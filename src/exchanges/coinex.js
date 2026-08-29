@@ -14,6 +14,7 @@ import {
 import {
   normalizeAssetTransferStatus,
 } from '../status.js';
+import { normalizeCoinExActivity } from '../statistics.js';
 
 export const DEFAULT_COINEX_BASE_URL = 'https://api.coinex.com/v2';
 
@@ -227,6 +228,59 @@ export class CoinExClient {
       signal: options.signal,
     });
     return balances.find((balance) => balance.asset === asset) ?? null;
+  }
+
+  async getAssetActivity({ coin, startTime, endTime, signal } = {}) {
+    const asset = normalizeAsset(coin);
+    const range = normalizeHistoryRange(startTime, endTime);
+    const deposits = await collectCoinExPages((page, limit) => this.#request(
+      '/assets/deposit-history',
+      {
+        auth: true,
+        query: { ccy: asset, page, limit },
+        signal,
+      },
+    ));
+    const withdrawals = await collectCoinExPages((page, limit) => this.#request(
+      '/assets/withdraw',
+      {
+        auth: true,
+        query: { ccy: asset, page, limit },
+        signal,
+      },
+    ));
+    const markets = await this.getMarkets({ signal });
+    const matchingMarkets = markets.filter((market) => (
+      coinExMarketIncludesAsset(market, asset)
+    ));
+    const deals = [];
+
+    for (const market of matchingMarkets) {
+      const marketDeals = await collectCoinExPages((page, limit) => this.#request(
+        '/spot/user-deals',
+        {
+          auth: true,
+          query: {
+            market: market.market,
+            market_type: 'SPOT',
+            start_time: range.startTime,
+            end_time: range.endTime - 1,
+            page,
+            limit,
+          },
+          signal,
+        },
+      ));
+      deals.push(...marketDeals);
+    }
+
+    return normalizeCoinExActivity({
+      coin: asset,
+      deposits,
+      withdrawals,
+      deals,
+      markets: matchingMarkets,
+    });
   }
 
   async getOrders({ pair, side, signal } = {}) {
@@ -518,6 +572,42 @@ function optionalPositiveDecimal(value, name) {
 function normalizeCoinList(coins) {
   const values = Array.isArray(coins) ? coins : String(coins).split(',');
   return values.map(normalizeAsset);
+}
+
+function normalizeHistoryRange(startTime, endTime) {
+  if (
+    !Number.isFinite(startTime) ||
+    !Number.isFinite(endTime) ||
+    startTime >= endTime
+  ) {
+    throw new HozamoValidationError(
+      'startTime and endTime must define a valid history period',
+    );
+  }
+  return { startTime: Math.trunc(startTime), endTime: Math.trunc(endTime) };
+}
+
+async function collectCoinExPages(fetchPage) {
+  const result = [];
+  const limit = 100;
+  for (let page = 1; ; page += 1) {
+    const payload = await fetchPage(page, limit);
+    const items = Array.isArray(payload?.data) ? payload.data : [];
+    result.push(...items);
+    const hasNext = payload?.pagination?.has_next;
+    if (hasNext !== true && (hasNext === false || items.length < limit)) {
+      return result;
+    }
+  }
+}
+
+function coinExMarketIncludesAsset(market, asset) {
+  try {
+    return [market?.base_ccy, market?.quote_ccy]
+      .some((value) => value !== undefined && normalizeAsset(String(value)) === asset);
+  } catch {
+    return false;
+  }
 }
 
 async function parseResponse(response) {

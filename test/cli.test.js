@@ -5,7 +5,7 @@ import { runCli } from '../src/cli.js';
 test('no command prints help instead of doing nothing', async () => {
   const result = await runWithClient([], {});
   assert.equal(result.code, 0);
-  assert.match(result.output, /Hozamo 0\.8\.0/);
+  assert.match(result.output, /Hozamo 0\.9\.0/);
   assert.match(result.output, /node hozamo price/);
 });
 
@@ -132,6 +132,147 @@ test('balance prints requested assets including a missing zero balance', async (
   assert.match(result.output, /QUAI   282\.85705135  282\.85705135  0/);
   assert.match(result.output, /RVN    0             0             0/);
   assert.doesNotMatch(result.output, /\t/);
+});
+
+test('stats prints SUM first and one UTC row for every requested day', async () => {
+  const fixedNow = Date.parse('2026-08-29T12:00:00Z');
+  const requested = [];
+  const result = await runWithClient(
+    ['stats', '--coin', 'PEARL', '--days', '3'],
+    {
+      displayName: 'CoinEx',
+      getAssetActivity: async (options) => {
+        requested.push(options);
+        return {
+          deposits: [
+            { timestamp: Date.parse('2026-08-28T01:00:00Z'), amount: '2.75' },
+            { timestamp: Date.parse('2026-08-29T01:00:00Z'), amount: '1.25' },
+          ],
+          withdrawals: [
+            { timestamp: Date.parse('2026-08-28T02:00:00Z'), amount: '0.5' },
+          ],
+          swaps: [
+            {
+              timestamp: Date.parse('2026-08-28T03:00:00Z'),
+              spentAmount: '1.5',
+              receivedAsset: 'USDT',
+              receivedAmount: '0.375',
+            },
+            {
+              timestamp: Date.parse('2026-08-29T03:00:00Z'),
+              spentAmount: '2',
+              receivedAsset: 'BTC',
+              receivedAmount: '0.00001',
+            },
+          ],
+        };
+      },
+    },
+    { now: () => fixedNow },
+  );
+
+  assert.equal(result.code, 0);
+  assert.deepEqual(requested, [{
+    coin: 'PEARL',
+    startTime: Date.parse('2026-08-27T00:00:00Z'),
+    endTime: fixedNow + 1,
+  }]);
+  const lines = result.output.split('\n');
+  const headerIndex = lines.findIndex((line) => line.startsWith('DATE'));
+  assert.ok(headerIndex >= 0);
+  assert.match(lines[headerIndex], /RECEIVED BTC \(GROSS\).*RECEIVED USDT \(GROSS\)/);
+  assert.match(lines[headerIndex + 1], /^SUM\s+4\s+0\.5\s+3\.5\s+0\.00001\s+0\.375/);
+  assert.match(lines[headerIndex + 2], /^2026-08-27\s+0\s+0\s+0/);
+  assert.match(lines[headerIndex + 3], /^2026-08-28\s+2\.75\s+0\.5\s+1\.5/);
+  assert.match(lines[headerIndex + 4], /^2026-08-29\s+1\.25\s+0\s+2/);
+});
+
+test('stats CSV contains only CSV with header, SUM and daily rows', async () => {
+  const result = await runWithClient(
+    [
+      'stats', '--coin', 'PEARL', '--from', '2026-08-28',
+      '--to', '2026-08-29', '--format', 'csv',
+    ],
+    {
+      getAssetActivity: async () => ({
+        deposits: [],
+        withdrawals: [],
+        swaps: [{
+          timestamp: Date.parse('2026-08-29T03:00:00Z'),
+          spentAmount: '2',
+          receivedAsset: 'USDT',
+          receivedAmount: '0.5',
+        }],
+      }),
+    },
+  );
+
+  assert.equal(result.code, 0);
+  assert.equal(result.output, [
+    'DATE,DEPOSITED PEARL,WITHDRAWN PEARL,SWAPPED PEARL,RECEIVED USDT (GROSS)',
+    'SUM,0,0,2,0.5',
+    '2026-08-28,0,0,0,0',
+    '2026-08-29,0,0,2,0.5',
+  ].join('\n'));
+  assert.doesNotMatch(result.output, /Exchange:/);
+});
+
+test('stats --hide-zero-days omits inactive dates from table and CSV', async () => {
+  const client = {
+    displayName: 'CoinEx',
+    getAssetActivity: async () => ({
+      deposits: [],
+      withdrawals: [],
+      swaps: [{
+        timestamp: Date.parse('2026-08-29T03:00:00Z'),
+        spentAmount: '2',
+        receivedAsset: 'USDT',
+        receivedAmount: '0.5',
+      }],
+    }),
+  };
+  const baseArgs = [
+    'stats', '--coin', 'PEARL', '--from', '2026-08-28',
+    '--to', '2026-08-29', '--hide-zero-days',
+  ];
+  const table = await runWithClient(baseArgs, client);
+  const csv = await runWithClient([...baseArgs, '--format', 'csv'], client);
+
+  assert.equal(table.code, 0);
+  assert.equal(
+    table.output.split('\n').some((line) => line.startsWith('2026-08-28')),
+    false,
+  );
+  assert.match(table.output, /^SUM\s+0\s+0\s+2\s+0\.5/m);
+  assert.match(table.output, /^2026-08-29\s+0\s+0\s+2\s+0\.5/m);
+  assert.equal(csv.code, 0);
+  assert.equal(csv.output, [
+    'DATE,DEPOSITED PEARL,WITHDRAWN PEARL,SWAPPED PEARL,RECEIVED USDT (GROSS)',
+    'SUM,0,0,2,0.5',
+    '2026-08-29,0,0,2,0.5',
+  ].join('\n'));
+});
+
+test('stats validates period and output format options', async () => {
+  const missingTo = await runWithClient(
+    ['stats', '--coin', 'PEARL', '--from', '2026-08-01'],
+    {},
+  );
+  const mixed = await runWithClient(
+    [
+      'stats', '--coin', 'PEARL', '--days', '7',
+      '--from', '2026-08-01', '--to', '2026-08-02',
+    ],
+    {},
+  );
+  const invalidFormat = await runWithClient(
+    ['stats', '--coin', 'PEARL', '--days', '7', '--format', 'json'],
+    {},
+  );
+
+  assert.match(missingTo.error, /--from and --to must be provided together/);
+  assert.match(mixed.error, /either --days or the --from\/--to date range/);
+  assert.match(invalidFormat.error, /--format is required and must be one of: table, csv/);
 });
 
 test('market sell checks available balance and submits after --yes', async () => {
@@ -522,6 +663,25 @@ test('Cloudflare API error is concise and actionable', async () => {
   assert.equal(result.code, 1);
   assert.match(result.error, /blocked the API request through Cloudflare/);
   assert.doesNotMatch(result.error, /<!DOCTYPE html>/);
+});
+
+test('--debug prints the failed API request without authentication headers', async () => {
+  const error = Object.assign(new Error('CoinEx API error 10001: Invalid Parameter'), {
+    exchange: 'coinex',
+    code: 'COINEX_API_ERROR',
+    method: 'GET',
+    url: 'https://api.coinex.com/v2/assets/deposit-history?coin=PEARL&page=1&limit=100',
+  });
+  Object.setPrototypeOf(error, (await import('../src/errors.js')).HozamoApiError.prototype);
+
+  const result = await runWithClient(
+    ['stats', '--coin', 'PEARL', '--days', '4', '--debug'],
+    { getAssetActivity: async () => { throw error; } },
+  );
+  assert.equal(result.code, 1);
+  assert.match(result.error, /CoinEx API error 10001: Invalid Parameter/);
+  assert.match(result.error, /Request: GET https:\/\/api\.coinex\.com\/v2\/assets\/deposit-history\?coin=PEARL/);
+  assert.doesNotMatch(result.error, /X-COINEX-(?:KEY|SIGN)/);
 });
 
 async function runWithClient(args, client, extra = {}) {

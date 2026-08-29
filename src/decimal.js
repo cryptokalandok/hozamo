@@ -16,6 +16,16 @@ export function multiplyDecimals(left, right) {
   return formatDecimal(a.coefficient * b.coefficient, a.scale + b.scale, true);
 }
 
+export function addDecimals(left, right) {
+  const a = parseDecimal(left);
+  const b = parseDecimal(right);
+  const scale = Math.max(a.scale, b.scale);
+  const aScaled = a.coefficient * 10n ** BigInt(scale - a.scale);
+  const bScaled = b.coefficient * 10n ** BigInt(scale - b.scale);
+
+  return formatDecimal(aScaled + bScaled, scale, true);
+}
+
 export function subtractDecimals(left, right) {
   const a = parseDecimal(left);
   const b = parseDecimal(right);

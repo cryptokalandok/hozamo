@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  addDecimals,
   applyPercent,
   compareDecimals,
   divideDecimals,
@@ -9,6 +10,11 @@ import {
   percentageOf,
   subtractDecimals,
 } from '../src/index.js';
+
+test('decimal addition stays exact', () => {
+  assert.equal(addDecimals('0.1', '0.2'), '0.3');
+  assert.equal(addDecimals('12.500', '0.005'), '12.505');
+});
 
 test('decimal comparison does not use floating point', () => {
   assert.equal(compareDecimals('10.00000000', '10'), 0);

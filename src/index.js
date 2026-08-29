@@ -30,6 +30,7 @@ export {
   normalizeProxyUrl,
 } from './network.js';
 export {
+  addDecimals,
   applyPercent,
   compareDecimals,
   divideDecimals,
@@ -38,6 +39,12 @@ export {
   percentageOf,
   subtractDecimals,
 } from './decimal.js';
+export {
+  aggregateAssetStatistics,
+  normalizeCoinExActivity,
+  normalizeSafeTradeActivity,
+  resolveStatisticsPeriod,
+} from './statistics.js';
 export {
   extractItems,
   normalizeAssetTransferStatus,

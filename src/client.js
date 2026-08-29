@@ -16,6 +16,7 @@ import {
   extractItems,
   normalizeAssetTransferStatus,
 } from './status.js';
+import { normalizeSafeTradeActivity } from './statistics.js';
 
 export const DEFAULT_BASE_URL = 'https://safe.trade/api/v2';
 
@@ -175,6 +176,50 @@ export class SafeTradeClient {
       signal: options.signal,
     });
     return balances.find((balance) => balance.asset === asset) ?? null;
+  }
+
+  async getAssetActivity({ coin, startTime, endTime, signal } = {}) {
+    const asset = normalizeAsset(coin);
+    const range = normalizeHistoryRange(startTime, endTime);
+    const query = {
+      currency: asset.toLowerCase(),
+      limit: 100,
+      order_by: 'created_at',
+      ordering: 'asc',
+    };
+    const deposits = await collectSafeTradePages((page) => this.#request(
+      '/trade/account/deposits',
+      { auth: true, query: { ...query, page }, signal },
+    ));
+    const withdrawals = await collectSafeTradePages((page) => this.#request(
+      '/trade/account/withdraws',
+      { auth: true, query: { ...query, page }, signal },
+    ));
+    const trades = await collectSafeTradePages((page) => this.#request(
+      '/trade/market/trades',
+      {
+        auth: true,
+        query: {
+          page,
+          limit: 100,
+          order_by: 'created_at',
+          ordering: 'asc',
+          time_from: Math.floor(range.startTime / 1000),
+          time_to: Math.ceil(range.endTime / 1000),
+        },
+        signal,
+      },
+    ));
+    const marketsPayload = await this.getMarkets({ signal });
+    const markets = extractItems(marketsPayload, ['markets']);
+
+    return normalizeSafeTradeActivity({
+      coin: asset,
+      deposits,
+      withdrawals,
+      trades,
+      markets,
+    });
   }
 
   async getOrders({ state, pair, signal } = {}) {
@@ -408,6 +453,32 @@ function normalizeEnum(value, fieldName, allowed) {
 function normalizeCoinList(coins) {
   const values = Array.isArray(coins) ? coins : String(coins).split(',');
   return values.map(normalizeAsset);
+}
+
+function normalizeHistoryRange(startTime, endTime) {
+  if (
+    !Number.isFinite(startTime) ||
+    !Number.isFinite(endTime) ||
+    startTime >= endTime
+  ) {
+    throw new SafeTradeValidationError(
+      'startTime and endTime must define a valid history period',
+    );
+  }
+  return { startTime: Math.trunc(startTime), endTime: Math.trunc(endTime) };
+}
+
+async function collectSafeTradePages(fetchPage) {
+  const result = [];
+  const limit = 100;
+  for (let page = 1; ; page += 1) {
+    const payload = await fetchPage(page);
+    const items = extractItems(payload);
+    result.push(...items);
+    if (items.length < limit) {
+      return result;
+    }
+  }
 }
 
 function safeTradeAssetCode(currency) {

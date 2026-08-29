@@ -1,6 +1,6 @@
 {
   "name": "hozamo",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "private": true,
   "description": "A multi-exchange spot trading CLI for SafeTrade and CoinEx.",
   "type": "module",
@@ -18,7 +18,7 @@
     "start": "node ./hozamo",
     "hozamo": "node ./hozamo",
     "test": "node --test",
-    "check": "node --check hozamo && node --check src/cli.js && node --check src/client.js && node --check src/exchanges/coinex.js && node --check src/exchanges/index.js && node --check src/status.js && node --check src/network.js && node --check src/decimal.js && node --check src/normalizers.js && node --check src/errors.js",
+    "check": "node --check hozamo && node --check src/cli.js && node --check src/client.js && node --check src/exchanges/coinex.js && node --check src/exchanges/index.js && node --check src/statistics.js && node --check src/status.js && node --check src/network.js && node --check src/decimal.js && node --check src/normalizers.js && node --check src/errors.js",
     "smoke:safetrade": "node ./hozamo price --exchange safetrade --pair BTC-USDT",
     "smoke:coinex": "node ./hozamo price --exchange coinex --pair BTC-USDT"
   },

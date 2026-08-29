@@ -25,10 +25,18 @@ import {
   splitPair,
 } from './normalizers.js';
 import { configureDnsResultOrder } from './network.js';
+import {
+  aggregateAssetStatistics,
+  resolveStatisticsPeriod,
+} from './statistics.js';
 
-const VERSION = '0.8.0';
+const VERSION = JSON.parse(
+  readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+).version;
 const DEFAULT_BUY_RESERVE_PERCENT = '0.5';
-const BOOLEAN_OPTIONS = new Set(['help', 'yes', 'dryrun', 'debug']);
+const BOOLEAN_OPTIONS = new Set([
+  'help', 'yes', 'dryrun', 'debug', 'hide-zero-days',
+]);
 
 export async function runCli(argv, dependencies = {}) {
   const stdout = dependencies.stdout ?? ((line) => console.log(line));
@@ -98,6 +106,16 @@ export async function runCli(argv, dependencies = {}) {
         assertKnownOptions(options, ['exchange', 'coin', 'debug']);
         await printBalances(client, options, stdout);
         return 0;
+      case 'stats':
+        assertKnownOptions(options, [
+          'exchange', 'coin', 'days', 'from', 'to', 'format',
+          'hide-zero-days', 'debug',
+        ]);
+        await printStatistics(client, options, {
+          stdout,
+          now: dependencies.now ?? Date.now,
+        });
+        return 0;
       case 'order':
         assertKnownOptions(options, [
           'exchange', 'type', 'side', 'order', 'pair', 'amount', 'price',
@@ -117,6 +135,12 @@ export async function runCli(argv, dependencies = {}) {
     }
   } catch (error) {
     stderr(formatCliError(error));
+    if (
+      debug && error instanceof HozamoApiError &&
+      error.method && error.url
+    ) {
+      stderr(`Request: ${error.method} ${error.url}`);
+    }
     if (debug && error?.stack) {
       stderr(error.stack);
     }
@@ -177,6 +201,75 @@ async function printBalances(client, options, stdout) {
 
   stdout(`Exchange: ${client.displayName ?? client.exchange}`);
   printTable(['ASSET', 'TOTAL', 'AVAILABLE', 'LOCKED'], rows, stdout);
+}
+
+async function printStatistics(client, options, { stdout, now }) {
+  requireOption(options.coin, '--coin');
+  const coin = normalizeAsset(options.coin);
+  const period = resolveStatisticsPeriod({
+    days: options.days,
+    from: options.from,
+    to: options.to,
+    now,
+  });
+  const format = normalizeChoice(
+    options.format ?? 'table',
+    'format',
+    ['table', 'csv'],
+  );
+  if (typeof client.getAssetActivity !== 'function') {
+    throw new HozamoValidationError(
+      'The selected exchange does not provide asset history statistics',
+    );
+  }
+
+  const activity = await client.getAssetActivity({
+    coin,
+    startTime: period.startTime,
+    endTime: period.endTime,
+  });
+  const report = aggregateAssetStatistics({
+    coin,
+    startTime: period.startTime,
+    endTime: period.endTime,
+    activity,
+  });
+  const headers = [
+    'DATE',
+    `DEPOSITED ${coin}`,
+    `WITHDRAWN ${coin}`,
+    `SWAPPED ${coin}`,
+    ...report.receivedAssets.map((asset) => `RECEIVED ${asset} (GROSS)`),
+  ];
+  const dailyRows = options['hide-zero-days']
+    ? report.rows.filter(statisticsRowHasActivity)
+    : report.rows;
+  const rows = [report.sum, ...dailyRows].map((row) => [
+    row.date,
+    row.deposited,
+    row.withdrawn,
+    row.swapped,
+    ...report.receivedAssets.map((asset) => row.received.get(asset) ?? '0'),
+  ]);
+
+  if (format === 'csv') {
+    printCsv(headers, rows, stdout);
+    return;
+  }
+
+  stdout(`Exchange: ${client.displayName ?? client.exchange}`);
+  stdout(`Asset: ${coin}`);
+  stdout(`Period: ${period.from} to ${period.to} (UTC, inclusive)`);
+  printTable(headers, rows, stdout);
+}
+
+function statisticsRowHasActivity(row) {
+  return [
+    row.deposited,
+    row.withdrawn,
+    row.swapped,
+    ...row.received.values(),
+  ].some((value) => compareDecimals(value, '0') !== 0);
 }
 
 async function submitOrder(
@@ -731,6 +824,20 @@ function printTable(headers, rows, stdout) {
   }
 }
 
+function printCsv(headers, rows, stdout) {
+  for (const row of [headers, ...rows]) {
+    stdout(row.map(formatCsvCell).join(','));
+  }
+}
+
+function formatCsvCell(value) {
+  const cell = String(value);
+  if (!/[",\r\n]/.test(cell)) {
+    return cell;
+  }
+  return `"${cell.replaceAll('"', '""')}"`;
+}
+
 function formatCliError(error) {
   if (error instanceof HozamoApiError && error.code === 'CLOUDFLARE_BLOCKED') {
     const ray = error.rayId ? ` Cloudflare Ray ID: ${error.rayId}.` : '';
@@ -753,12 +860,15 @@ Commands:
   price      Show the last traded price for a pair
   status     Show asset and network deposit/withdrawal status
   balance    Show total, available and locked balances
+  stats      Show daily deposit, withdrawal and swap statistics
   order      Validate and submit a market or limit order
 
 Examples:
   node hozamo price --exchange coinex --pair BTC-USDT
   node hozamo status --exchange coinex --coin PEARL,USDT
   node hozamo balance --exchange coinex --coin QUAI,RVN
+  node hozamo stats --exchange coinex --coin PEARL --days 30
+  node hozamo stats --exchange safetrade --coin PEARL --from 2026-08-01 --to 2026-08-31 --format csv
   node hozamo order --exchange coinex --type market --side sell --pair BTC-USDT --amount 0.001
   node hozamo order --exchange coinex --type market --side sell --pair BTC-USDT --balance-percent 100
   node hozamo order --exchange coinex --type market --side sell --pair BTC-USDT --receive 100 --dryrun
@@ -777,6 +887,21 @@ function commandHelp(command) {
 Shows deposit/withdrawal availability for one or more comma-separated assets.
 Network-specific rows are included when the exchange provides them.`,
     balance: `Usage: node hozamo balance [--exchange safetrade|coinex] --coin QUAI,RVN`,
+    stats: `Usage: node hozamo stats [--exchange safetrade|coinex] --coin PEARL [period] [options]
+
+Period (use exactly one form):
+  --days 30             Current UTC day and the preceding 29 UTC days
+  --from 2026-08-01     First UTC date, inclusive
+  --to 2026-08-31       Last UTC date, inclusive; required with --from
+
+Options:
+  --format table        Aligned table output (default)
+  --format csv          CSV written to stdout
+  --hide-zero-days      Omit UTC dates where every value is zero
+
+Only credited deposits and successful withdrawals are included. Swaps are
+completed trades that spend the requested coin. Received amounts are gross and
+are reported in separate columns for each received asset.`,
     order: `Usage: node hozamo order --type market|limit --side buy|sell [options]
 
 Options:

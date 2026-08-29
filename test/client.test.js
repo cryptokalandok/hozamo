@@ -136,6 +136,123 @@ test('getBalances authenticates, normalizes and filters balances', async () => {
   );
 });
 
+test('SafeTrade asset activity requests and normalizes credited history', async () => {
+  const calls = [];
+  const client = createClient(calls, (url) => {
+    if (url.pathname.endsWith('/trade/account/deposits')) {
+      const page = url.searchParams.get('page');
+      return jsonResponse(page === '1' ? [
+        {
+          id: 1,
+          currency: 'pearl',
+          amount: '12.5',
+          status: 'accepted',
+          created_at: '2026-08-28T08:00:00Z',
+        },
+        ...Array.from({ length: 99 }, (_, index) => ({
+          id: 2,
+          currency: 'pearl',
+          amount: '99',
+          status: 'rejected',
+          created_at: '2026-08-28T09:00:00Z',
+          pageItem: index,
+        })),
+      ] : []);
+    }
+    if (url.pathname.endsWith('/trade/account/withdraws')) {
+      return jsonResponse([{
+        id: 3,
+        currency_id: 'pearl',
+        amount: '2',
+        status: 'succeed',
+        created_at: '2026-08-28T10:00:00Z',
+      }]);
+    }
+    if (url.pathname.endsWith('/trade/market/trades')) {
+      return jsonResponse([
+        {
+          id: 4,
+          market: 'pearlusdt',
+          order_side: 'sell',
+          amount: '5',
+          price: '0.3',
+          total: '1.5',
+          created_at: '2026-08-28T11:00:00Z',
+        },
+        {
+          id: 5,
+          market: 'btcpearl',
+          order_side: 'buy',
+          amount: '0.01',
+          price: '1000',
+          total: '10',
+          created_at: '2026-08-28T12:00:00Z',
+        },
+        {
+          id: 6,
+          market: 'pearlusdt',
+          order_side: 'buy',
+          amount: '5',
+          total: '1.5',
+          created_at: '2026-08-28T13:00:00Z',
+        },
+      ]);
+    }
+    if (url.pathname.endsWith('/trade/public/markets')) {
+      return jsonResponse({ data: [
+        { id: 'pearlusdt', base_unit: 'pearl', quote_unit: 'usdt' },
+        { id: 'btcpearl', base_unit: 'btc', quote_unit: 'pearl' },
+      ] });
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  });
+
+  const startTime = Date.parse('2026-08-01T00:00:00Z');
+  const endTime = Date.parse('2026-09-01T00:00:00Z');
+  const result = await client.getAssetActivity({
+    coin: 'PEARL',
+    startTime,
+    endTime,
+  });
+
+  assert.deepEqual(
+    result.deposits.map(({ amount }) => amount),
+    ['12.5'],
+  );
+  assert.deepEqual(
+    result.withdrawals.map(({ amount }) => amount),
+    ['2'],
+  );
+  assert.deepEqual(
+    result.swaps.map(({ spentAmount, receivedAsset, receivedAmount }) => ({
+      spentAmount, receivedAsset, receivedAmount,
+    })),
+    [
+      { spentAmount: '5', receivedAsset: 'USDT', receivedAmount: '1.5' },
+      { spentAmount: '10', receivedAsset: 'BTC', receivedAmount: '0.01' },
+    ],
+  );
+  const depositUrl = new URL(calls.find(({ url }) => (
+    url.includes('/trade/account/deposits')
+  )).url);
+  assert.equal(depositUrl.searchParams.get('currency'), 'pearl');
+  assert.equal(depositUrl.searchParams.has('time_from'), false);
+  assert.equal(depositUrl.searchParams.has('time_to'), false);
+  assert.equal(depositUrl.searchParams.get('limit'), '100');
+  assert.equal(depositUrl.searchParams.get('page'), '1');
+  assert.deepEqual(
+    calls
+      .filter(({ url }) => url.includes('/trade/account/deposits'))
+      .map(({ url }) => new URL(url).searchParams.get('page')),
+    ['1', '2'],
+  );
+  const tradeUrl = new URL(calls.find(({ url }) => (
+    url.includes('/trade/market/trades')
+  )).url);
+  assert.equal(tradeUrl.searchParams.get('time_from'), '1785542400');
+  assert.equal(tradeUrl.searchParams.get('time_to'), '1788220800');
+});
+
 test('createOrder sends a market sell without price', async () => {
   const calls = [];
   const client = createClient(calls, () => jsonResponse({ id: 123 }, 201));

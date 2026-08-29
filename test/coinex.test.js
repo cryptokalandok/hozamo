@@ -140,6 +140,119 @@ test('CoinEx asset status supports multiple coins and chain-level status', async
   );
 });
 
+test('CoinEx asset activity requests deposits, withdrawals and matching deals', async () => {
+  const calls = [];
+  const client = createClient(calls, (url) => {
+    if (url.pathname.endsWith('/assets/deposit-history')) {
+      const page = url.searchParams.get('page');
+      return coinExPaginatedResponse(page === '1' ? [
+        {
+          deposit_id: 1,
+          ccy: 'PEARL',
+          amount: '10',
+          actual_amount: '',
+          status: 'finished',
+          created_at: Date.parse('2026-08-28T08:00:00Z'),
+        },
+        {
+          deposit_id: 5,
+          ccy: 'PEARL',
+          amount: '0.1',
+          actual_amount: '0.1',
+          status: 'finish',
+          created_at: Date.parse('2026-08-28T08:30:00Z'),
+        },
+      ] : [], page === '1');
+    }
+    if (url.pathname.endsWith('/assets/withdraw')) {
+      return coinExResponse([{
+        withdraw_id: 2,
+        ccy: 'PEARL',
+        amount: '3',
+        status: 'finished',
+        created_at: Date.parse('2026-08-28T09:00:00Z'),
+      }]);
+    }
+    if (url.pathname.endsWith('/spot/market')) {
+      return coinExResponse([
+        { market: 'PEARLUSDT', base_ccy: 'PEARL', quote_ccy: 'USDT' },
+        { market: 'BTCPEARL', base_ccy: 'BTC', quote_ccy: 'PEARL' },
+        { market: 'ETHUSDT', base_ccy: 'ETH', quote_ccy: 'USDT' },
+      ]);
+    }
+    if (url.pathname.endsWith('/spot/user-deals')) {
+      const market = url.searchParams.get('market');
+      return coinExResponse(market === 'PEARLUSDT'
+        ? [{
+          deal_id: 3,
+          market,
+          side: 'sell',
+          amount: '5',
+          price: '0.25',
+          created_at: Date.parse('2026-08-28T10:00:00Z'),
+        }]
+        : [{
+          deal_id: 4,
+          market,
+          side: 'buy',
+          amount: '0.01',
+          price: '1000',
+          created_at: Date.parse('2026-08-28T11:00:00Z'),
+        }]);
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  });
+
+  const startTime = Date.parse('2026-08-01T00:00:00Z');
+  const endTime = Date.parse('2026-09-01T00:00:00Z');
+  const result = await client.getAssetActivity({
+    coin: 'PEARL',
+    startTime,
+    endTime,
+  });
+
+  assert.deepEqual(result.deposits.map(({ amount }) => amount), ['10', '0.1']);
+  assert.equal(result.withdrawals[0].amount, '3');
+  assert.deepEqual(
+    result.swaps.map(({ spentAmount, receivedAsset, receivedAmount }) => ({
+      spentAmount, receivedAsset, receivedAmount,
+    })),
+    [
+      { spentAmount: '5', receivedAsset: 'USDT', receivedAmount: '1.25' },
+      { spentAmount: '10', receivedAsset: 'BTC', receivedAmount: '0.01' },
+    ],
+  );
+  const depositUrl = new URL(calls.find(({ url }) => (
+    url.includes('/assets/deposit-history')
+  )).url);
+  assert.equal(depositUrl.searchParams.get('ccy'), 'PEARL');
+  assert.equal(depositUrl.searchParams.has('coin'), false);
+  assert.equal(depositUrl.searchParams.has('status'), false);
+  assert.equal(depositUrl.searchParams.get('limit'), '100');
+  const withdrawalUrl = new URL(calls.find(({ url }) => (
+    url.includes('/assets/withdraw')
+  )).url);
+  assert.equal(withdrawalUrl.searchParams.get('ccy'), 'PEARL');
+  assert.equal(withdrawalUrl.searchParams.has('coin'), false);
+  assert.equal(withdrawalUrl.searchParams.has('status'), false);
+  assert.deepEqual(
+    calls
+      .filter(({ url }) => url.includes('/assets/deposit-history'))
+      .map(({ url }) => new URL(url).searchParams.get('page')),
+    ['1', '2'],
+  );
+  const dealUrls = calls
+    .filter(({ url }) => url.includes('/spot/user-deals'))
+    .map(({ url }) => new URL(url));
+  assert.deepEqual(
+    dealUrls.map((url) => url.searchParams.get('market')),
+    ['PEARLUSDT', 'BTCPEARL'],
+  );
+  assert.equal(dealUrls[0].searchParams.get('market_type'), 'SPOT');
+  assert.equal(dealUrls[0].searchParams.get('start_time'), String(startTime));
+  assert.equal(dealUrls[0].searchParams.get('end_time'), String(endTime - 1));
+});
+
 test('CoinEx limit order sends the documented v2 request body and signature', async () => {
   const calls = [];
   const client = createClient(calls, () => coinExResponse({
@@ -291,6 +404,18 @@ function createClient(calls, responder) {
 
 function coinExResponse(data) {
   return new Response(JSON.stringify({ code: 0, data, message: 'OK' }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+function coinExPaginatedResponse(data, hasNext) {
+  return new Response(JSON.stringify({
+    code: 0,
+    data,
+    pagination: { has_next: hasNext },
+    message: 'OK',
+  }), {
     status: 200,
     headers: { 'Content-Type': 'application/json' },
   });

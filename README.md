@@ -160,6 +160,54 @@ is exposed as `locked`, and `total` is calculated exactly as
 `available + locked`. A requested asset missing from the API response is
 displayed as zero.
 
+### Asset statistics
+
+Show the current UTC day and the preceding 29 UTC days:
+
+```bash
+node hozamo stats \
+  --exchange coinex \
+  --coin PEARL \
+  --days 30
+```
+
+Or select an inclusive UTC date range and write CSV to a file:
+
+```bash
+node hozamo stats \
+  --exchange safetrade \
+  --coin PEARL \
+  --from 2026-08-01 \
+  --to 2026-08-31 \
+  --format csv > pearl-2026-08.csv
+```
+
+The default output is an aligned table. CSV output contains no explanatory
+text, so it can be redirected directly to a `.csv` file. In both formats the
+first data row is `SUM`, followed by one row for every UTC date in the selected
+period, including dates with no activity. Add `--hide-zero-days` to keep the
+`SUM` row but omit dates where every reported value is zero. This option works
+with both table and CSV output.
+
+The report contains:
+
+- credited deposits of the requested asset;
+- successful withdrawals of the requested asset;
+- completed spot executions that spend the requested asset;
+- one gross `RECEIVED ...` column for every asset received by those swaps.
+
+A swap can spend the requested asset either by selling it as the base asset or
+by using it as the quote asset to buy another coin. Acquisitions of the
+requested asset are not counted as outgoing swaps. Received values are kept in
+their original assets instead of combining unlike units such as BTC and USDT.
+They are gross execution values; trading fees are not deducted.
+
+SafeTrade's transfer date filters apply to record updates rather than the
+original transfer date. CoinEx does not provide transfer date filters. Hozamo
+therefore paginates deposit and withdrawal histories on both exchanges and
+applies the requested UTC period locally. Execution histories use each
+exchange's server-side date filters.
+
 ### Market order
 
 ```bash
