@@ -5,7 +5,7 @@ import { runCli } from '../src/cli.js';
 test('no command prints help instead of doing nothing', async () => {
   const result = await runWithClient([], {});
   assert.equal(result.code, 0);
-  assert.match(result.output, /Hozamo 0\.9\.0/);
+  assert.match(result.output, /Hozamo 0\.10\.0/);
   assert.match(result.output, /node hozamo price/);
 });
 
@@ -251,6 +251,126 @@ test('stats --hide-zero-days omits inactive dates from table and CSV', async () 
     'SUM,0,0,2,0.5',
     '2026-08-29,0,0,2,0.5',
   ].join('\n'));
+});
+
+test('stats --deposits-by-source splits SafeTrade deposits by known and unknown sources', async () => {
+  const result = await runWithClient(
+    [
+      'stats', '--exchange', 'safetrade', '--coin', 'PRL',
+      '--from', '2026-08-28', '--to', '2026-08-29',
+      '--deposits-by-source', '--format', 'csv',
+    ],
+    {
+      getAssetActivity: async () => ({
+        deposits: [
+          {
+            timestamp: Date.parse('2026-08-28T01:00:00Z'),
+            amount: '2',
+            sourceAddress: 'prl1puv0gqv4x0wd0ylwz086y3sqrg4a6umza9r08aecehjrmdqq7mctsmqaqsh',
+          },
+          {
+            timestamp: Date.parse('2026-08-28T02:00:00Z'),
+            amount: '0.5',
+            sourceAddress: 'prl1abcdefghijklmnopqrstuvwxyz0123456789',
+          },
+          {
+            timestamp: Date.parse('2026-08-29T01:00:00Z'),
+            amount: '3',
+            sourceAddress: 'prl1pksfzrn8g760gmcqy65a4tl30eyv25eksl5sf8y332kes6fwx9pjszgymmz',
+          },
+          {
+            timestamp: Date.parse('2026-08-29T02:00:00Z'),
+            amount: '1',
+            sourceAddress: null,
+          },
+        ],
+        withdrawals: [],
+        swaps: [],
+      }),
+    },
+  );
+
+  assert.equal(result.code, 0);
+  assert.equal(result.output, [
+    'DATE,DEPOSITED PRL,FROM Kryptex,FROM HeroMiners,FROM prl1abc..3456789,FROM UNKNOWN,WITHDRAWN PRL,SWAPPED PRL',
+    'SUM,6.5,2,3,0.5,1,0,0',
+    '2026-08-28,2.5,2,0,0.5,0,0,0',
+    '2026-08-29,4,0,3,0,1,0,0',
+  ].join('\n'));
+});
+
+test('stats --deposits-by-source supports custom pool names and multiple addresses', async () => {
+  const result = await runWithClient(
+    [
+      'stats', '--coin', 'PRL', '--days', '1',
+      '--deposits-by-source', '--format', 'csv',
+    ],
+    {
+      getAssetActivity: async () => ({
+        deposits: [
+          { timestamp: 1, amount: '1', sourceAddress: 'pool-address-1' },
+          { timestamp: 2, amount: '2', sourceAddress: 'pool-address-2' },
+        ],
+        withdrawals: [],
+        swaps: [],
+      }),
+    },
+    {
+      now: () => Date.parse('1970-01-01T00:00:01Z'),
+      env: {
+        HOZAMO_DEPOSIT_SOURCES: JSON.stringify({
+          'My Pool': ['pool-address-1', 'pool-address-2'],
+        }),
+      },
+    },
+  );
+
+  assert.equal(result.code, 0);
+  assert.equal(result.output, [
+    'DATE,DEPOSITED PRL,FROM My Pool,WITHDRAWN PRL,SWAPPED PRL',
+    'SUM,3,3,0,0',
+    '1970-01-01,3,3,0,0',
+  ].join('\n'));
+});
+
+test('stats rejects --deposits-by-source on CoinEx before requesting history', async () => {
+  let requested = false;
+  const result = await runWithClient(
+    [
+      'stats', '--exchange', 'coinex', '--coin', 'PEARL', '--days', '7',
+      '--deposits-by-source',
+    ],
+    {
+      getAssetActivity: async () => { requested = true; },
+    },
+  );
+
+  assert.equal(result.code, 1);
+  assert.equal(requested, false);
+  assert.match(
+    result.error,
+    /CoinEx API does not provide deposit source addresses.*--deposits-by-source cannot be used with CoinEx/,
+  );
+});
+
+test('stats validates custom deposit source configuration only when requested', async () => {
+  const client = {
+    getAssetActivity: async () => ({ deposits: [], withdrawals: [], swaps: [] }),
+  };
+  const withoutFlag = await runWithClient(
+    ['stats', '--coin', 'PRL', '--days', '1'],
+    client,
+    { env: { HOZAMO_DEPOSIT_SOURCES: 'not-json' } },
+  );
+  const withFlag = await runWithClient(
+    ['stats', '--coin', 'PRL', '--days', '1', '--deposits-by-source'],
+    client,
+    { env: { HOZAMO_DEPOSIT_SOURCES: 'not-json' } },
+  );
+
+  assert.equal(withoutFlag.code, 0);
+  assert.equal(withFlag.code, 1);
+  assert.match(withFlag.error, /HOZAMO_DEPOSIT_SOURCES must be a valid JSON object/);
 });
 
 test('stats validates period and output format options', async () => {

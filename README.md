@@ -66,6 +66,8 @@ HOZAMO_EXCHANGE=coinex
 HOZAMO_DNS_RESULT_ORDER=ipv4first
 # Leave empty for direct connections, or set one global proxy:
 # HOZAMO_PROXY_URL=https://username:password@proxy.example.com:8443
+# Optional SafeTrade pool address book used by --deposits-by-source:
+# HOZAMO_DEPOSIT_SOURCES='{"My Pool":"prl1..."}'
 
 COINEX_API_KEY=your-access-id
 COINEX_API_SECRET=your-secret-key
@@ -201,6 +203,36 @@ by using it as the quote asset to buy another coin. Acquisitions of the
 requested asset are not counted as outgoing swaps. Received values are kept in
 their original assets instead of combining unlike units such as BTC and USDT.
 They are gross execution values; trading fees are not deducted.
+
+SafeTrade deposits can also be split into source columns:
+
+```bash
+node hozamo stats \
+  --exchange safetrade \
+  --coin PRL \
+  --days 30 \
+  --deposits-by-source
+```
+
+The total `DEPOSITED PRL` column remains in the report and is followed by one
+`FROM ...` column for every source found in the selected period. Hozamo knows
+the Kryptex, PearlHash and HeroMiners PRL payout addresses by default. An
+unrecognized address is displayed using its first and last seven characters,
+for example `prl1abc..3456789`. A deposit without an address is grouped under
+`UNKNOWN`.
+
+Additional pools can be configured in `.env` as a JSON object whose keys are
+display names and whose values are either one address or an array of addresses:
+
+```dotenv
+HOZAMO_DEPOSIT_SOURCES='{"LuckyPool":"prl1...","My Pool":["prl1...","prl1..."]}'
+```
+
+Multiple addresses with the same name are combined into one column. A custom
+entry can also rename a built-in address. The option is intentionally limited
+to SafeTrade: CoinEx's authenticated deposit API exposes only the receiving
+`to_address`, not the source address, so CoinEx rejects
+`--deposits-by-source` with an explanatory error.
 
 SafeTrade's transfer date filters apply to record updates rather than the
 original transfer date. CoinEx does not provide transfer date filters. Hozamo

@@ -151,6 +151,7 @@ test('CoinEx asset activity requests deposits, withdrawals and matching deals', 
           ccy: 'PEARL',
           amount: '10',
           actual_amount: '',
+          to_address: 'prl1pcoinexdepositaddress',
           status: 'finished',
           created_at: Date.parse('2026-08-28T08:00:00Z'),
         },
@@ -212,6 +213,10 @@ test('CoinEx asset activity requests deposits, withdrawals and matching deals', 
   });
 
   assert.deepEqual(result.deposits.map(({ amount }) => amount), ['10', '0.1']);
+  assert.deepEqual(
+    result.deposits.map(({ sourceAddress }) => sourceAddress),
+    [null, null],
+  );
   assert.equal(result.withdrawals[0].amount, '3');
   assert.deepEqual(
     result.swaps.map(({ spentAmount, receivedAsset, receivedAmount }) => ({

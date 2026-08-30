@@ -12,6 +12,11 @@ import {
   subtractDecimals,
 } from './decimal.js';
 import {
+  buildDepositSourceColumns,
+  depositSourceAmount,
+  parseDepositSourceBook,
+} from './deposit-sources.js';
+import {
   HozamoApiError,
   HozamoValidationError,
 } from './errors.js';
@@ -35,7 +40,7 @@ const VERSION = JSON.parse(
 ).version;
 const DEFAULT_BUY_RESERVE_PERCENT = '0.5';
 const BOOLEAN_OPTIONS = new Set([
-  'help', 'yes', 'dryrun', 'debug', 'hide-zero-days',
+  'help', 'yes', 'dryrun', 'debug', 'hide-zero-days', 'deposits-by-source',
 ]);
 
 export async function runCli(argv, dependencies = {}) {
@@ -109,11 +114,13 @@ export async function runCli(argv, dependencies = {}) {
       case 'stats':
         assertKnownOptions(options, [
           'exchange', 'coin', 'days', 'from', 'to', 'format',
-          'hide-zero-days', 'debug',
+          'hide-zero-days', 'deposits-by-source', 'debug',
         ]);
         await printStatistics(client, options, {
           stdout,
           now: dependencies.now ?? Date.now,
+          exchange,
+          depositSources: config.HOZAMO_DEPOSIT_SOURCES,
         });
         return 0;
       case 'order':
@@ -203,7 +210,11 @@ async function printBalances(client, options, stdout) {
   printTable(['ASSET', 'TOTAL', 'AVAILABLE', 'LOCKED'], rows, stdout);
 }
 
-async function printStatistics(client, options, { stdout, now }) {
+async function printStatistics(
+  client,
+  options,
+  { stdout, now, exchange, depositSources },
+) {
   requireOption(options.coin, '--coin');
   const coin = normalizeAsset(options.coin);
   const period = resolveStatisticsPeriod({
@@ -217,6 +228,16 @@ async function printStatistics(client, options, { stdout, now }) {
     'format',
     ['table', 'csv'],
   );
+  const depositsBySource = options['deposits-by-source'] === true;
+  if (depositsBySource && exchange === 'coinex') {
+    throw new HozamoValidationError(
+      'CoinEx API does not provide deposit source addresses, so ' +
+      '--deposits-by-source cannot be used with CoinEx',
+    );
+  }
+  const sourceBook = depositsBySource
+    ? parseDepositSourceBook(depositSources)
+    : null;
   if (typeof client.getAssetActivity !== 'function') {
     throw new HozamoValidationError(
       'The selected exchange does not provide asset history statistics',
@@ -234,9 +255,13 @@ async function printStatistics(client, options, { stdout, now }) {
     endTime: period.endTime,
     activity,
   });
+  const sourceColumns = depositsBySource
+    ? buildDepositSourceColumns(report.rows, sourceBook)
+    : [];
   const headers = [
     'DATE',
     `DEPOSITED ${coin}`,
+    ...sourceColumns.map(({ label }) => `FROM ${label}`),
     `WITHDRAWN ${coin}`,
     `SWAPPED ${coin}`,
     ...report.receivedAssets.map((asset) => `RECEIVED ${asset} (GROSS)`),
@@ -247,6 +272,7 @@ async function printStatistics(client, options, { stdout, now }) {
   const rows = [report.sum, ...dailyRows].map((row) => [
     row.date,
     row.deposited,
+    ...sourceColumns.map((column) => depositSourceAmount(row, column)),
     row.withdrawn,
     row.swapped,
     ...report.receivedAssets.map((asset) => row.received.get(asset) ?? '0'),
@@ -898,10 +924,14 @@ Options:
   --format table        Aligned table output (default)
   --format csv          CSV written to stdout
   --hide-zero-days      Omit UTC dates where every value is zero
+  --deposits-by-source  Add one deposit column for each SafeTrade source address
 
 Only credited deposits and successful withdrawals are included. Swaps are
 completed trades that spend the requested coin. Received amounts are gross and
-are reported in separate columns for each received asset.`,
+are reported in separate columns for each received asset.
+
+--deposits-by-source is supported by SafeTrade only. Known pool names are
+resolved from the built-in and HOZAMO_DEPOSIT_SOURCES address books.`,
     order: `Usage: node hozamo order --type market|limit --side buy|sell [options]
 
 Options:

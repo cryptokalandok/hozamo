@@ -146,6 +146,7 @@ test('SafeTrade asset activity requests and normalizes credited history', async 
           id: 1,
           currency: 'pearl',
           amount: '12.5',
+          address: 'prl1psourceaddress',
           status: 'accepted',
           created_at: '2026-08-28T08:00:00Z',
         },
@@ -216,8 +217,10 @@ test('SafeTrade asset activity requests and normalizes credited history', async 
   });
 
   assert.deepEqual(
-    result.deposits.map(({ amount }) => amount),
-    ['12.5'],
+    result.deposits.map(({ amount, sourceAddress }) => ({
+      amount, sourceAddress,
+    })),
+    [{ amount: '12.5', sourceAddress: 'prl1psourceaddress' }],
   );
   assert.deepEqual(
     result.withdrawals.map(({ amount }) => amount),

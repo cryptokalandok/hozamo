@@ -4,6 +4,13 @@ export {
   createSignature,
 } from './client.js';
 export {
+  BUILT_IN_DEPOSIT_SOURCES,
+  buildDepositSourceColumns,
+  depositSourceAmount,
+  parseDepositSourceBook,
+  shortenDepositSourceAddress,
+} from './deposit-sources.js';
+export {
   HozamoApiError,
   HozamoConfigError,
   HozamoError,

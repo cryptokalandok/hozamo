@@ -111,7 +111,12 @@ export function normalizeSafeTradeActivity({
     deposits: deposits
       .filter((item) => transferMatchesAsset(item, asset))
       .filter((item) => statusIn(item.status, SAFE_TRADE_DEPOSIT_SUCCESS))
-      .map((item) => normalizeTransfer(item, 'deposit')),
+      .map((item) => normalizeTransfer(
+        item,
+        'deposit',
+        undefined,
+        item.source_address ?? item.from_address ?? item.address,
+      )),
     withdrawals: withdrawals
       .filter((item) => transferMatchesAsset(item, asset))
       .filter((item) => statusIn(item.status, SAFE_TRADE_WITHDRAWAL_SUCCESS))
@@ -183,7 +188,7 @@ export function aggregateAssetStatistics({
   }
 
   for (const deposit of activity.deposits ?? []) {
-    addEventAmount(rowsByDate, deposit, startTime, endTime, 'deposited');
+    addDeposit(rowsByDate, deposit, startTime, endTime);
   }
   for (const withdrawal of activity.withdrawals ?? []) {
     addEventAmount(rowsByDate, withdrawal, startTime, endTime, 'withdrawn');
@@ -212,6 +217,12 @@ export function aggregateAssetStatistics({
     sum.deposited = addDecimals(sum.deposited, row.deposited);
     sum.withdrawn = addDecimals(sum.withdrawn, row.withdrawn);
     sum.swapped = addDecimals(sum.swapped, row.swapped);
+    for (const [sourceAddress, amount] of row.depositedBySource) {
+      sum.depositedBySource.set(
+        sourceAddress,
+        addDecimals(sum.depositedBySource.get(sourceAddress) ?? '0', amount),
+      );
+    }
     for (const receivedAsset of receivedAssets) {
       sum.received.set(
         receivedAsset,
@@ -226,7 +237,7 @@ export function aggregateAssetStatistics({
   return { coin: asset, receivedAssets, sum, rows };
 }
 
-function normalizeTransfer(item, kind, preferredAmount) {
+function normalizeTransfer(item, kind, preferredAmount, sourceAddress) {
   const amount = (
     preferredAmount === undefined ||
     preferredAmount === null ||
@@ -236,7 +247,15 @@ function normalizeTransfer(item, kind, preferredAmount) {
     id: item.id ?? item.deposit_id ?? item.withdraw_id ?? null,
     timestamp: normalizeTimestamp(item.created_at, `${kind} created_at`),
     amount: normalizeDecimal(amount, `${kind} amount`),
+    sourceAddress: normalizeOptionalAddress(sourceAddress),
   };
+}
+
+function normalizeOptionalAddress(value) {
+  if (value === undefined || value === null || String(value).trim() === '') {
+    return null;
+  }
+  return String(value).trim();
 }
 
 function normalizeSwap({ trade, asset, market, side, timestamp, amount, value }) {
@@ -348,10 +367,27 @@ function emptyRow(date) {
   return {
     date,
     deposited: '0',
+    depositedBySource: new Map(),
     withdrawn: '0',
     swapped: '0',
     received: new Map(),
   };
+}
+
+function addDeposit(rowsByDate, event, startTime, endTime) {
+  if (!isInPeriod(event.timestamp, startTime, endTime)) {
+    return;
+  }
+  const row = rowsByDate.get(formatUtcDate(event.timestamp));
+  if (!row) {
+    return;
+  }
+  const sourceAddress = normalizeOptionalAddress(event.sourceAddress);
+  row.deposited = addDecimals(row.deposited, event.amount);
+  row.depositedBySource.set(
+    sourceAddress,
+    addDecimals(row.depositedBySource.get(sourceAddress) ?? '0', event.amount),
+  );
 }
 
 function addEventAmount(rowsByDate, event, startTime, endTime, field) {
