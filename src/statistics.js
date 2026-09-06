@@ -202,6 +202,13 @@ export function aggregateAssetStatistics({
       continue;
     }
     row.swapped = addDecimals(row.swapped, swap.spentAmount);
+    row.swappedByReceivedAsset.set(
+      swap.receivedAsset,
+      addDecimals(
+        row.swappedByReceivedAsset.get(swap.receivedAsset) ?? '0',
+        swap.spentAmount,
+      ),
+    );
     row.received.set(
       swap.receivedAsset,
       addDecimals(row.received.get(swap.receivedAsset) ?? '0', swap.receivedAmount),
@@ -217,6 +224,12 @@ export function aggregateAssetStatistics({
     sum.deposited = addDecimals(sum.deposited, row.deposited);
     sum.withdrawn = addDecimals(sum.withdrawn, row.withdrawn);
     sum.swapped = addDecimals(sum.swapped, row.swapped);
+    for (const [receivedAsset, amount] of row.swappedByReceivedAsset) {
+      sum.swappedByReceivedAsset.set(
+        receivedAsset,
+        addDecimals(sum.swappedByReceivedAsset.get(receivedAsset) ?? '0', amount),
+      );
+    }
     for (const [sourceAddress, amount] of row.depositedBySource) {
       sum.depositedBySource.set(
         sourceAddress,
@@ -370,6 +383,7 @@ function emptyRow(date) {
     depositedBySource: new Map(),
     withdrawn: '0',
     swapped: '0',
+    swappedByReceivedAsset: new Map(),
     received: new Map(),
   };
 }

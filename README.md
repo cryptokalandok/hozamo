@@ -204,6 +204,28 @@ requested asset are not counted as outgoing swaps. Received values are kept in
 their original assets instead of combining unlike units such as BTC and USDT.
 They are gross execution values; trading fees are not deducted.
 
+Add `--average-price` to append a gross weighted-average USDT sell-price
+column:
+
+```bash
+node hozamo stats \
+  --exchange coinex \
+  --coin PEARL \
+  --days 30 \
+  --average-price \
+  --average-price-decimals 8
+```
+
+For each UTC date, `AVG SELL PRICE (USDT/PEARL)` is calculated as the gross
+USDT received divided by the PEARL amount spent in those USDT trades. The
+`SUM` row uses the totals for the complete period, so it is a volume-weighted
+average rather than an average of the daily prices. Swaps that receive BTC or
+another asset do not affect the USDT average. A row without a USDT trade shows
+`N/A`. The calculation uses exact decimal arithmetic and returns up to 5
+decimal places by default. Set `--average-price-decimals` to an integer from 0
+to 100 to change that precision; the option can only be used together with
+`--average-price`.
+
 SafeTrade deposits can also be split into source columns:
 
 ```bash

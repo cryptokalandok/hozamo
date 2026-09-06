@@ -5,7 +5,7 @@ import { runCli } from '../src/cli.js';
 test('no command prints help instead of doing nothing', async () => {
   const result = await runWithClient([], {});
   assert.equal(result.code, 0);
-  assert.match(result.output, /Hozamo 0\.10\.0/);
+  assert.match(result.output, /Hozamo 0\.11\.0/);
   assert.match(result.output, /node hozamo price/);
 });
 
@@ -215,6 +215,114 @@ test('stats CSV contains only CSV with header, SUM and daily rows', async () => 
     '2026-08-29,0,0,2,0.5',
   ].join('\n'));
   assert.doesNotMatch(result.output, /Exchange:/);
+});
+
+test('stats --average-price adds daily and weighted-period USDT sell prices', async () => {
+  const result = await runWithClient(
+    [
+      'stats', '--coin', 'PEARL', '--from', '2026-08-27',
+      '--to', '2026-08-29', '--average-price', '--format', 'csv',
+    ],
+    {
+      getAssetActivity: async () => ({
+        deposits: [],
+        withdrawals: [],
+        swaps: [
+          {
+            timestamp: Date.parse('2026-08-28T01:00:00Z'),
+            spentAmount: '2',
+            receivedAsset: 'USDT',
+            receivedAmount: '0.54',
+          },
+          {
+            timestamp: Date.parse('2026-08-28T02:00:00Z'),
+            spentAmount: '3',
+            receivedAsset: 'USDT',
+            receivedAmount: '0.9',
+          },
+          {
+            timestamp: Date.parse('2026-08-28T03:00:00Z'),
+            spentAmount: '10',
+            receivedAsset: 'BTC',
+            receivedAmount: '0.0001',
+          },
+          {
+            timestamp: Date.parse('2026-08-29T01:00:00Z'),
+            spentAmount: '4',
+            receivedAsset: 'USDT',
+            receivedAmount: '1.4',
+          },
+        ],
+      }),
+    },
+  );
+
+  assert.equal(result.code, 0);
+  assert.equal(result.output, [
+    'DATE,DEPOSITED PEARL,WITHDRAWN PEARL,SWAPPED PEARL,RECEIVED BTC (GROSS),RECEIVED USDT (GROSS),AVG SELL PRICE (USDT/PEARL)',
+    'SUM,0,0,19,0.0001,2.84,0.31555',
+    '2026-08-27,0,0,0,0,0,N/A',
+    '2026-08-28,0,0,15,0.0001,1.44,0.288',
+    '2026-08-29,0,0,4,0,1.4,0.35',
+  ].join('\n'));
+});
+
+test('stats --average-price-decimals overrides the default precision', async () => {
+  const result = await runWithClient(
+    [
+      'stats', '--coin', 'PEARL', '--days', '1', '--average-price',
+      '--average-price-decimals', '8', '--format', 'csv',
+    ],
+    {
+      getAssetActivity: async () => ({
+        deposits: [],
+        withdrawals: [],
+        swaps: [{
+          timestamp: 1,
+          spentAmount: '9',
+          receivedAsset: 'USDT',
+          receivedAmount: '2.84',
+        }],
+      }),
+    },
+    { now: () => Date.parse('1970-01-01T00:00:01Z') },
+  );
+
+  assert.equal(result.code, 0);
+  assert.match(result.output, /^SUM,0,0,9,2\.84,0\.31555555$/m);
+});
+
+test('stats validates --average-price-decimals before requesting history', async () => {
+  let requested = false;
+  const client = {
+    getAssetActivity: async () => { requested = true; },
+  };
+  const withoutAveragePrice = await runWithClient(
+    [
+      'stats', '--coin', 'PEARL', '--days', '1',
+      '--average-price-decimals', '8',
+    ],
+    client,
+  );
+  const invalidPrecision = await runWithClient(
+    [
+      'stats', '--coin', 'PEARL', '--days', '1', '--average-price',
+      '--average-price-decimals', '101',
+    ],
+    client,
+  );
+
+  assert.equal(withoutAveragePrice.code, 1);
+  assert.match(
+    withoutAveragePrice.error,
+    /--average-price-decimals can only be used with --average-price/,
+  );
+  assert.equal(invalidPrecision.code, 1);
+  assert.match(
+    invalidPrecision.error,
+    /--average-price-decimals must be an integer between 0 and 100/,
+  );
+  assert.equal(requested, false);
 });
 
 test('stats --hide-zero-days omits inactive dates from table and CSV', async () => {

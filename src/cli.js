@@ -39,8 +39,11 @@ const VERSION = JSON.parse(
   readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
 ).version;
 const DEFAULT_BUY_RESERVE_PERCENT = '0.5';
+const DEFAULT_AVERAGE_PRICE_DECIMALS = 5;
+const MAX_AVERAGE_PRICE_DECIMALS = 100;
 const BOOLEAN_OPTIONS = new Set([
   'help', 'yes', 'dryrun', 'debug', 'hide-zero-days', 'deposits-by-source',
+  'average-price',
 ]);
 
 export async function runCli(argv, dependencies = {}) {
@@ -114,7 +117,8 @@ export async function runCli(argv, dependencies = {}) {
       case 'stats':
         assertKnownOptions(options, [
           'exchange', 'coin', 'days', 'from', 'to', 'format',
-          'hide-zero-days', 'deposits-by-source', 'debug',
+          'hide-zero-days', 'deposits-by-source', 'average-price',
+          'average-price-decimals', 'debug',
         ]);
         await printStatistics(client, options, {
           stdout,
@@ -229,6 +233,11 @@ async function printStatistics(
     ['table', 'csv'],
   );
   const depositsBySource = options['deposits-by-source'] === true;
+  const averagePrice = options['average-price'] === true;
+  const averagePriceDecimals = normalizeAveragePriceDecimals(
+    options['average-price-decimals'],
+    averagePrice,
+  );
   if (depositsBySource && exchange === 'coinex') {
     throw new HozamoValidationError(
       'CoinEx API does not provide deposit source addresses, so ' +
@@ -265,6 +274,7 @@ async function printStatistics(
     `WITHDRAWN ${coin}`,
     `SWAPPED ${coin}`,
     ...report.receivedAssets.map((asset) => `RECEIVED ${asset} (GROSS)`),
+    ...(averagePrice ? [`AVG SELL PRICE (USDT/${coin})`] : []),
   ];
   const dailyRows = options['hide-zero-days']
     ? report.rows.filter(statisticsRowHasActivity)
@@ -276,6 +286,9 @@ async function printStatistics(
     row.withdrawn,
     row.swapped,
     ...report.receivedAssets.map((asset) => row.received.get(asset) ?? '0'),
+    ...(averagePrice
+      ? [formatAverageSalePrice(row, averagePriceDecimals)]
+      : []),
   ]);
 
   if (format === 'csv') {
@@ -296,6 +309,39 @@ function statisticsRowHasActivity(row) {
     row.swapped,
     ...row.received.values(),
   ].some((value) => compareDecimals(value, '0') !== 0);
+}
+
+function formatAverageSalePrice(row, decimals) {
+  const swappedToUsdt = row.swappedByReceivedAsset.get('USDT') ?? '0';
+  if (compareDecimals(swappedToUsdt, '0') === 0) {
+    return 'N/A';
+  }
+  return divideDecimals(row.received.get('USDT') ?? '0', swappedToUsdt, decimals);
+}
+
+function normalizeAveragePriceDecimals(value, averagePriceEnabled) {
+  if (value === undefined) {
+    return DEFAULT_AVERAGE_PRICE_DECIMALS;
+  }
+  if (!averagePriceEnabled) {
+    throw new HozamoValidationError(
+      '--average-price-decimals can only be used with --average-price',
+    );
+  }
+
+  const normalized = String(value).trim();
+  if (!/^(?:0|[1-9]\d*)$/.test(normalized)) {
+    throw new HozamoValidationError(
+      `--average-price-decimals must be an integer between 0 and ${MAX_AVERAGE_PRICE_DECIMALS}`,
+    );
+  }
+  const decimals = Number(normalized);
+  if (!Number.isSafeInteger(decimals) || decimals > MAX_AVERAGE_PRICE_DECIMALS) {
+    throw new HozamoValidationError(
+      `--average-price-decimals must be an integer between 0 and ${MAX_AVERAGE_PRICE_DECIMALS}`,
+    );
+  }
+  return decimals;
 }
 
 async function submitOrder(
@@ -894,6 +940,7 @@ Examples:
   node hozamo status --exchange coinex --coin PEARL,USDT
   node hozamo balance --exchange coinex --coin QUAI,RVN
   node hozamo stats --exchange coinex --coin PEARL --days 30
+  node hozamo stats --exchange coinex --coin PEARL --days 30 --average-price
   node hozamo stats --exchange safetrade --coin PEARL --from 2026-08-01 --to 2026-08-31 --format csv
   node hozamo order --exchange coinex --type market --side sell --pair BTC-USDT --amount 0.001
   node hozamo order --exchange coinex --type market --side sell --pair BTC-USDT --balance-percent 100
@@ -925,13 +972,21 @@ Options:
   --format csv          CSV written to stdout
   --hide-zero-days      Omit UTC dates where every value is zero
   --deposits-by-source  Add one deposit column for each SafeTrade source address
+  --average-price       Add the weighted average USDT sell price
+  --average-price-decimals 5
+                        Maximum decimal places in average prices (default: 5)
 
 Only credited deposits and successful withdrawals are included. Swaps are
 completed trades that spend the requested coin. Received amounts are gross and
 are reported in separate columns for each received asset.
 
 --deposits-by-source is supported by SafeTrade only. Known pool names are
-resolved from the built-in and HOZAMO_DEPOSIT_SOURCES address books.`,
+resolved from the built-in and HOZAMO_DEPOSIT_SOURCES address books.
+
+--average-price divides gross USDT received by the requested coin amount spent
+in those USDT trades. Swaps into other assets do not affect the average.
+--average-price-decimals accepts an integer from 0 to 100 and requires
+--average-price.`,
     order: `Usage: node hozamo order --type market|limit --side buy|sell [options]
 
 Options:
