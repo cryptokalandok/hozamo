@@ -1,6 +1,6 @@
 {
   "name": "hozamo",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "private": true,
   "description": "A multi-exchange spot trading CLI for SafeTrade and CoinEx.",
   "type": "module",
@@ -17,8 +17,9 @@
   "scripts": {
     "start": "node ./hozamo",
     "hozamo": "node ./hozamo",
+    "build:standalone": "node ./scripts/build-standalone.mjs",
     "test": "node --test",
-    "check": "node --check hozamo && node --check src/cli.js && node --check src/client.js && node --check src/deposit-sources.js && node --check src/exchanges/coinex.js && node --check src/exchanges/index.js && node --check src/index.js && node --check src/statistics.js && node --check src/status.js && node --check src/network.js && node --check src/decimal.js && node --check src/normalizers.js && node --check src/errors.js",
+    "check": "node --check hozamo && node --check src/standalone-entry.js && node --check scripts/build-standalone.mjs && node --check src/cli.js && node --check src/client.js && node --check src/deposit-sources.js && node --check src/exchanges/coinex.js && node --check src/exchanges/index.js && node --check src/index.js && node --check src/statistics.js && node --check src/status.js && node --check src/network.js && node --check src/decimal.js && node --check src/normalizers.js && node --check src/errors.js",
     "smoke:safetrade": "node ./hozamo price --exchange safetrade --pair BTC-USDT",
     "smoke:coinex": "node ./hozamo price --exchange coinex --pair BTC-USDT"
   },
@@ -31,5 +32,9 @@
   "license": "MIT",
   "dependencies": {
     "undici": "^6.21.3"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "postject": "^1.0.0-alpha.6"
   }
 }

@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { stdin as processStdin, stdout as processStdout } from 'node:process';
 import {
@@ -35,9 +35,18 @@ import {
   resolveStatisticsPeriod,
 } from './statistics.js';
 
-const VERSION = JSON.parse(
-  readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
-).version;
+const STANDALONE = (
+  typeof __HOZAMO_STANDALONE__ !== 'undefined' &&
+  __HOZAMO_STANDALONE__ === true
+);
+const VERSION = typeof __HOZAMO_VERSION__ === 'string'
+  ? __HOZAMO_VERSION__
+  : JSON.parse(
+    readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+  ).version;
+const CLI_INVOCATION = STANDALONE
+  ? (process.platform === 'win32' ? 'hozamo.exe' : './hozamo')
+  : 'node hozamo';
 const DEFAULT_BUY_RESERVE_PERCENT = '0.5';
 const DEFAULT_AVERAGE_PRICE_DECIMALS = 5;
 const MAX_AVERAGE_PRICE_DECIMALS = 100;
@@ -78,8 +87,14 @@ export async function runCli(argv, dependencies = {}) {
       return 0;
     }
 
+    const executableDir = dependencies.executableDir ?? (
+      STANDALONE ? dirname(process.execPath) : undefined
+    );
+    const executableEnv = executableDir
+      ? loadEnvFile(join(executableDir, '.env'))
+      : {};
     const fileEnv = loadEnvFile(join(cwd, '.env'));
-    const config = { ...fileEnv, ...env };
+    const config = { ...executableEnv, ...fileEnv, ...env };
     configureDnsResultOrder(
       config.HOZAMO_DNS_RESULT_ORDER,
       dependencies.setDnsResultOrder,
@@ -141,7 +156,7 @@ export async function runCli(argv, dependencies = {}) {
         return 0;
       default:
         throw new HozamoValidationError(
-          `Unknown command: ${command}. Use "node hozamo --help".`,
+          `Unknown command: ${command}. Use "${CLI_INVOCATION} --help".`,
         );
     }
   } catch (error) {
@@ -926,7 +941,7 @@ function helpText() {
   return `Hozamo ${VERSION} — multi-exchange spot trading CLI
 
 Usage:
-  node hozamo <command> [options]
+  ${CLI_INVOCATION} <command> [options]
 
 Commands:
   price      Show the last traded price for a pair
@@ -936,31 +951,31 @@ Commands:
   order      Validate and submit a market or limit order
 
 Examples:
-  node hozamo price --exchange coinex --pair BTC-USDT
-  node hozamo status --exchange coinex --coin PEARL,USDT
-  node hozamo balance --exchange coinex --coin QUAI,RVN
-  node hozamo stats --exchange coinex --coin PEARL --days 30
-  node hozamo stats --exchange coinex --coin PEARL --days 30 --average-price
-  node hozamo stats --exchange safetrade --coin PEARL --from 2026-08-01 --to 2026-08-31 --format csv
-  node hozamo order --exchange coinex --type market --side sell --pair BTC-USDT --amount 0.001
-  node hozamo order --exchange coinex --type market --side sell --pair BTC-USDT --balance-percent 100
-  node hozamo order --exchange coinex --type market --side sell --pair BTC-USDT --receive 100 --dryrun
-  node hozamo order --exchange coinex --type market --side buy --pair BTC-USDT --balance-percent 100 --dryrun
-  node hozamo order --exchange coinex --type limit --side sell --pair BTC-USDT --amount 0.001 --price-percent 10
-  node hozamo order --exchange coinex --type limit --side sell --pair BTC-USDT --amount 0.001 --price 60000 --dryrun
+  ${CLI_INVOCATION} price --exchange coinex --pair BTC-USDT
+  ${CLI_INVOCATION} status --exchange coinex --coin PEARL,USDT
+  ${CLI_INVOCATION} balance --exchange coinex --coin QUAI,RVN
+  ${CLI_INVOCATION} stats --exchange coinex --coin PEARL --days 30
+  ${CLI_INVOCATION} stats --exchange coinex --coin PEARL --days 30 --average-price
+  ${CLI_INVOCATION} stats --exchange safetrade --coin PEARL --from 2026-08-01 --to 2026-08-31 --format csv
+  ${CLI_INVOCATION} order --exchange coinex --type market --side sell --pair BTC-USDT --amount 0.001
+  ${CLI_INVOCATION} order --exchange coinex --type market --side sell --pair BTC-USDT --balance-percent 100
+  ${CLI_INVOCATION} order --exchange coinex --type market --side sell --pair BTC-USDT --receive 100 --dryrun
+  ${CLI_INVOCATION} order --exchange coinex --type market --side buy --pair BTC-USDT --balance-percent 100 --dryrun
+  ${CLI_INVOCATION} order --exchange coinex --type limit --side sell --pair BTC-USDT --amount 0.001 --price-percent 10
+  ${CLI_INVOCATION} order --exchange coinex --type limit --side sell --pair BTC-USDT --amount 0.001 --price 60000 --dryrun
 
-Run "node hozamo <command> --help" for command-specific help.`;
+Run "${CLI_INVOCATION} <command> --help" for command-specific help.`;
 }
 
 function commandHelp(command) {
   const help = {
-    price: `Usage: node hozamo price [--exchange safetrade|coinex] --pair BTC-USDT`,
-    status: `Usage: node hozamo status [--exchange safetrade|coinex] --coin PEARL,USDT
+    price: `Usage: ${CLI_INVOCATION} price [--exchange safetrade|coinex] --pair BTC-USDT`,
+    status: `Usage: ${CLI_INVOCATION} status [--exchange safetrade|coinex] --coin PEARL,USDT
 
 Shows deposit/withdrawal availability for one or more comma-separated assets.
 Network-specific rows are included when the exchange provides them.`,
-    balance: `Usage: node hozamo balance [--exchange safetrade|coinex] --coin QUAI,RVN`,
-    stats: `Usage: node hozamo stats [--exchange safetrade|coinex] --coin PEARL [period] [options]
+    balance: `Usage: ${CLI_INVOCATION} balance [--exchange safetrade|coinex] --coin QUAI,RVN`,
+    stats: `Usage: ${CLI_INVOCATION} stats [--exchange safetrade|coinex] --coin PEARL [period] [options]
 
 Period (use exactly one form):
   --days 30             Current UTC day and the preceding 29 UTC days
@@ -987,7 +1002,7 @@ resolved from the built-in and HOZAMO_DEPOSIT_SOURCES address books.
 in those USDT trades. Swaps into other assets do not affect the average.
 --average-price-decimals accepts an integer from 0 to 100 and requires
 --average-price.`,
-    order: `Usage: node hozamo order --type market|limit --side buy|sell [options]
+    order: `Usage: ${CLI_INVOCATION} order --type market|limit --side buy|sell [options]
 
 Options:
   --exchange coinex     Exchange (default: HOZAMO_EXCHANGE or safetrade)

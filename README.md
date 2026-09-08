@@ -6,7 +6,7 @@ later be called from an AWS Lambda handler.
 
 > **Setting up Hozamo?** Follow the
 > [environment setup guide](docs/environment.md) for step-by-step HiveOS/Linux
-> and Windows instructions, API credential configuration and scheduled-run
+> Windows and macOS instructions, API credential configuration and scheduled-run
 > working-directory requirements.
 
 > [!WARNING]
@@ -18,21 +18,60 @@ later be called from an AWS Lambda handler.
 >
 > Most importantly: **NEVER share your API key or secret with anyone.** Treat them like account credentials. A compromised API key may allow an unauthorized person to place harmful trades, and unnecessary permissions could put the assets stored in your account at even greater risk.
 
-## Requirements
+## Downloads and requirements
 
-- Node.js 20 or newer
-- An API key for balances and orders on the selected exchange
-- `npm install` to install the pinned HTTP client used for optional proxying
+Every release provides both standalone executables and the existing Node.js
+source packages:
 
-Public price requests do not require an API key. CoinEx status requests use its
-authenticated deposit/withdrawal configuration endpoint.
+| Release asset | Platform | Requires Node.js |
+| --- | --- | --- |
+| `hozamo-vX.Y.Z-linux-x64-standalone.tar.gz` | 64-bit Linux and HiveOS | No |
+| `hozamo-vX.Y.Z-windows-x64-standalone.zip` | 64-bit Windows | No |
+| `hozamo-vX.Y.Z-macos-arm64-standalone.tar.gz` | Apple Silicon macOS | No |
+| `hozamo-vX.Y.Z-macos-x64-standalone.tar.gz` | Intel macOS | No |
+| `hozamo-vX.Y.Z-linux.tar.gz` | Linux source package | Node.js 20 or newer |
+| `hozamo-vX.Y.Z-windows.zip` | Windows source package | Node.js 20 or newer |
 
-## Run the CLI
+An API key is required for balances, statistics and orders on the selected
+exchange. Public price requests do not require one. CoinEx status requests use
+its authenticated deposit/withdrawal configuration endpoint.
 
-Install dependencies once, then run the CLI:
+## Run a standalone executable
+
+Download and extract the standalone archive for your operating system. Copy
+`.env.example` to `.env`, configure it, then run Hozamo directly.
+
+Linux, HiveOS and macOS:
 
 ```bash
-npm install
+cp .env.example .env
+./hozamo --help
+./hozamo price --exchange coinex --pair BTC-USDT
+```
+
+Windows PowerShell:
+
+```powershell
+Copy-Item .env.example .env
+.\hozamo.exe --help
+.\hozamo.exe price --exchange coinex --pair BTC-USDT
+```
+
+The standalone executables embed Node.js and their production dependencies;
+Node.js and npm do not need to be installed. They are currently not signed with
+a commercial code-signing certificate or notarized by Apple, so Windows
+SmartScreen or macOS Gatekeeper may require you to approve the first launch.
+Do not disable either operating-system protection globally.
+
+## Run the Node.js source package
+
+The source packages remain available for users who prefer them. Release source
+archives already contain production dependencies and can be run immediately
+when Node.js 20 or newer is installed. For a Git checkout, install its exact
+dependencies first:
+
+```bash
+npm ci
 node hozamo --help
 node hozamo price --exchange coinex --pair BTC-USDT
 ```
@@ -50,7 +89,9 @@ Alternatively, every command can be run through npm:
 npm run hozamo -- price --exchange coinex --pair BTC-USDT
 ```
 
-Running `node hozamo` without a command prints the help screen.
+Running `node hozamo` without a command prints the help screen. In the command
+examples below, standalone users can replace `node hozamo` with `./hozamo` on
+Linux/macOS or `.\hozamo.exe` in Windows PowerShell.
 
 ## Configuration
 
@@ -82,8 +123,11 @@ Exchange selection uses this precedence:
 2. `HOZAMO_EXCHANGE` from the environment or `.env`;
 3. `safetrade` for backward compatibility.
 
-The CLI loads `.env` itself; no `dotenv` package is needed. Existing shell
-environment variables override values from the file.
+The CLI loads `.env` itself; no `dotenv` package is needed. It first checks the
+directory containing the standalone executable and then the current working
+directory. A current-directory value takes precedence, and existing shell
+environment variables override both files. The Node.js source version checks
+the current working directory only.
 
 `HOZAMO_DNS_RESULT_ORDER` controls DNS address ordering for every exchange,
 not only SafeTrade. It defaults to `ipv4first`, which prefers IPv4 without
@@ -609,4 +653,5 @@ uses `X-COINEX-KEY`, `X-COINEX-SIGN`, `X-COINEX-TIMESTAMP` and
 - [SafeTrade official example client](https://github.com/safetrade-exchange/example-client)
 - [Reported SafeTrade Cloudflare block](https://github.com/safetrade-exchange/example-client/issues/1)
 - [Undici ProxyAgent documentation](https://github.com/nodejs/undici/blob/main/docs/docs/api/ProxyAgent.md)
+- [Node.js single executable applications](https://nodejs.org/api/single-executable-applications.html)
 - [Squid HTTPS CONNECT documentation](https://wiki.squid-cache.org/Features/HTTPS)

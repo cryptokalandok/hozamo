@@ -1,12 +1,57 @@
 import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 import { runCli } from '../src/cli.js';
 
 test('no command prints help instead of doing nothing', async () => {
   const result = await runWithClient([], {});
   assert.equal(result.code, 0);
-  assert.match(result.output, /Hozamo 0\.11\.0/);
+  assert.match(result.output, /Hozamo 0\.12\.0/);
   assert.match(result.output, /node hozamo price/);
+});
+
+test('standalone mode loads .env beside the executable with cwd precedence', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'hozamo-env-test-'));
+  const executableDir = join(root, 'executable');
+  const cwd = join(root, 'working-directory');
+  mkdirSync(executableDir);
+  mkdirSync(cwd);
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+
+  writeFileSync(
+    join(executableDir, '.env'),
+    'HOZAMO_EXCHANGE=safetrade\nHOZAMO_TIMEOUT_MS=12000\n',
+  );
+  writeFileSync(
+    join(cwd, '.env'),
+    'HOZAMO_EXCHANGE=coinex\n',
+  );
+
+  const factoryCalls = [];
+  const code = await runCli(
+    ['price', '--pair', 'BTC-USDT'],
+    {
+      clientFactory: (options) => {
+        factoryCalls.push(options);
+        return {
+          exchange: options.exchange,
+          getPrice: async () => ({ price: '60000' }),
+        };
+      },
+      stdout: () => {},
+      stderr: () => {},
+      env: {},
+      cwd,
+      executableDir,
+      setDnsResultOrder: () => {},
+    },
+  );
+
+  assert.equal(code, 0);
+  assert.equal(factoryCalls[0].exchange, 'coinex');
+  assert.equal(factoryCalls[0].timeoutMs, 12000);
 });
 
 test('--exchange coinex selects the CoinEx client', async () => {

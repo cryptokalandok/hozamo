@@ -1,8 +1,10 @@
 # Environment setup
 
-This guide configures Hozamo on HiveOS/Linux or Windows. Hozamo reads a
-`.env` file from the **current working directory** every time the CLI starts.
-Operating-system environment variables override values from `.env`.
+This guide configures Hozamo on HiveOS/Linux, Windows or macOS. The standalone
+release reads `.env` from its own directory and then from the **current working
+directory** every time it starts. The Node.js source version reads it from the
+current working directory. Operating-system environment variables override
+values from either file.
 
 API credentials should be stored in `.env`, not passed as command-line
 arguments. Create dedicated exchange credentials with spot-trading permission
@@ -10,25 +12,27 @@ only and disable withdrawals.
 
 ## What you need
 
-- Node.js 20 or newer; the current LTS release is recommended
 - an extracted Hozamo release package or a Git checkout of the repository
 - internet access to the configured exchanges
 - an API key and secret for each exchange whose private endpoints you use
 
-`npm` is included with the normal Node.js installation. Git is only required if
-you choose to clone the source instead of downloading a release package.
+Node.js 20 or newer is required only for a source package or Git checkout. The
+standalone packages include their own Node.js runtime. Git is only required if
+you choose to clone the source.
 
 ## Choose an installation method
 
 | Method | Recommended for | Additional installation step |
 | --- | --- | --- |
-| Release archive | Regular users | None; production dependencies are included |
+| Standalone release | Regular users | None; Node.js is embedded |
+| Source release | Users who want the packaged Node.js source | Install Node.js 20 or newer |
 | Git checkout | Contributors or users following the latest source | Run `npm ci` after cloning and after each update |
 
 Release archives are available on the
 [Hozamo Releases page](https://github.com/cryptokalandok/hozamo/releases).
-They are not standalone executables: Node.js must still be installed on the
-computer. Do not run `npm install` inside an extracted release archive.
+The original Linux and Windows source archives remain available alongside the
+standalone executables. Do not run `npm install` inside an extracted source
+release archive because its production dependencies are already included.
 
 ## HiveOS and Linux
 
@@ -36,7 +40,7 @@ These commands apply to HiveOS, Ubuntu and other Debian-based distributions.
 HiveOS terminals normally run as `root`; in that case omit `sudo` from the
 commands.
 
-### 1. Install Node.js and basic tools
+### 1. Install basic tools and, when needed, Node.js
 
 First install the tools needed to download and configure Node.js:
 
@@ -45,8 +49,9 @@ sudo apt-get update
 sudo apt-get install -y ca-certificates curl nano
 ```
 
-Install the current Node.js LTS release system-wide. A system-wide installation
-gives scheduled tasks a stable Node.js path:
+Skip the rest of this step when using a standalone package. For a source
+package or Git checkout, install the current Node.js LTS release system-wide.
+A system-wide installation gives scheduled tasks a stable Node.js path:
 
 ```bash
 curl -fsSL https://deb.nodesource.com/setup_24.x -o /tmp/nodesource_setup.sh
@@ -73,14 +78,18 @@ continuing.
 
 ### 2. Download Hozamo
 
-For the recommended release installation, download the Linux `.tar.gz` asset
+For the recommended installation, download the standalone Linux `.tar.gz` asset
 from the [latest release](https://github.com/cryptokalandok/hozamo/releases/latest),
 then extract it. Replace `X.Y.Z` with the downloaded version:
 
 ```bash
-tar -xzf hozamo-vX.Y.Z-linux.tar.gz
-cd hozamo-vX.Y.Z-linux
+tar -xzf hozamo-vX.Y.Z-linux-x64-standalone.tar.gz
+cd hozamo-vX.Y.Z-linux-x64-standalone
 ```
+
+To use the Node.js source release instead, download and extract
+`hozamo-vX.Y.Z-linux.tar.gz`. It requires Node.js but already contains its
+production dependencies.
 
 To use a Git checkout instead, install Git, clone the repository and install
 the exact dependencies recorded in `package-lock.json`:
@@ -116,11 +125,12 @@ chmod 600 .env
 Verify that Hozamo starts from this directory:
 
 ```bash
-node hozamo --help
+./hozamo --help
 ```
 
-The public smoke tests verify Node.js, DNS and exchange connectivity without
-submitting an order:
+For the source package or Git checkout, use `node hozamo --help`. The npm smoke
+scripts are also available from source and verify DNS and exchange connectivity
+without submitting an order:
 
 ```bash
 npm run smoke:coinex
@@ -137,15 +147,16 @@ npm test
 
 ### HiveOS and cron working directory
 
-Hozamo looks for `.env` in the process's current working directory. A cron
-job or HiveOS command must therefore change to the repository before starting
-the CLI. For example:
+Changing to the Hozamo directory remains the clearest cron or HiveOS setup,
+although the standalone executable can also find `.env` beside itself. For
+example:
 
 ```cron
-0 12 * * * cd /path/to/hozamo && /usr/bin/node ./hozamo balance --exchange coinex --coin BTC >> /var/log/hozamo.log 2>&1
+0 12 * * * cd /path/to/hozamo && ./hozamo balance --exchange coinex --coin BTC >> /var/log/hozamo.log 2>&1
 ```
 
-Confirm the actual Node.js path before using it in cron:
+For a source installation, keep `/usr/bin/node ./hozamo` and confirm the actual
+Node.js path before using it in cron:
 
 ```bash
 command -v node
@@ -158,9 +169,11 @@ Avoid placing API keys directly in a crontab or HiveOS flight sheet command.
 The following commands use PowerShell. You do not need Windows Subsystem for
 Linux (WSL).
 
-### 1. Install Node.js
+### 1. Install Node.js only when using source
 
-On Windows 10 or 11, install the current Node.js LTS release with `winget`:
+Skip this step when using the standalone package. For a source package or Git
+checkout on Windows 10 or 11, install the current Node.js LTS release with
+`winget`:
 
 ```powershell
 winget install --id OpenJS.NodeJS.LTS -e
@@ -187,7 +200,7 @@ The Node.js version must start with `v20` or a newer major version.
 For the recommended installation:
 
 1. Open the [latest release](https://github.com/cryptokalandok/hozamo/releases/latest).
-2. Download `hozamo-vX.Y.Z-windows.zip` from **Assets**.
+2. Download `hozamo-vX.Y.Z-windows-x64-standalone.zip` from **Assets**.
 3. Right-click the downloaded file, select **Extract All**, and move the
    extracted directory somewhere permanent, for example into your user
    directory.
@@ -197,10 +210,12 @@ You can also change directory manually. Replace the example path with the
 actual extracted directory:
 
 ```powershell
-Set-Location "$HOME\Hozamo\hozamo-vX.Y.Z-windows"
+Set-Location "$HOME\Hozamo\hozamo-vX.Y.Z-windows-x64-standalone"
 ```
 
-The release package contains its production dependencies, so do not run
+The standalone package contains `hozamo.exe` and does not need Node.js or npm.
+The existing `hozamo-vX.Y.Z-windows.zip` source package is also available; it
+requires Node.js and contains its production dependencies, so do not run
 `npm install` in it.
 
 To use the Git checkout instead, install Git, open a new PowerShell window,
@@ -238,7 +253,13 @@ a normal local file and must not be emailed, uploaded or committed.
 Verify the installation from the Hozamo directory:
 
 ```powershell
-.\hozamo.cmd --help
+.\hozamo.exe --help
+```
+
+For a source package or Git checkout, use `.\hozamo.cmd --help`. Its npm smoke
+scripts remain available:
+
+```powershell
 npm run smoke:coinex
 npm run smoke:safetrade
 ```
@@ -255,7 +276,7 @@ PowerShell variables can temporarily override `.env` for the current terminal:
 
 ```powershell
 $env:HOZAMO_EXCHANGE = "coinex"
-.\hozamo.cmd price --pair BTC-USDT
+.\hozamo.exe price --pair BTC-USDT
 ```
 
 Do not use `setx` for exchange secrets. It stores them persistently in the
@@ -267,13 +288,32 @@ When creating a scheduled task, configure these fields:
 
 | Task Scheduler field | Value |
 | --- | --- |
-| Program/script | `C:\Program Files\nodejs\node.exe` |
-| Add arguments | `"C:\path\to\hozamo\hozamo"` followed by the command and its options |
+| Program/script | `C:\path\to\hozamo\hozamo.exe` |
+| Add arguments | The Hozamo command and its options |
 | Start in | `C:\path\to\hozamo` |
 
 Do not put quotes in **Start in**. Setting it to the repository directory is
-required for Hozamo to find `.env`. Use an absolute path for the script and
-test the exact command interactively before scheduling it.
+recommended and allows Hozamo to find `.env`. Use an absolute executable path
+and test the exact command interactively before scheduling it. For a source
+installation, keep `node.exe` as Program/script and pass the absolute `hozamo`
+script path before the command options.
+
+## macOS
+
+Download `hozamo-vX.Y.Z-macos-arm64-standalone.tar.gz` for an Apple Silicon Mac
+or `hozamo-vX.Y.Z-macos-x64-standalone.tar.gz` for an Intel Mac. Extract it,
+open Terminal in the extracted directory, and configure it in the same way as
+Linux:
+
+```bash
+cp .env.example .env
+chmod 600 .env
+./hozamo --help
+```
+
+The macOS executable is ad-hoc signed but not Apple-notarized. Gatekeeper may
+block its first launch. Approve that individual executable from **System
+Settings → Privacy & Security**; do not disable Gatekeeper globally.
 
 ## Configure `.env`
 
@@ -339,15 +379,18 @@ URL-encode special characters in proxy usernames or passwords. See the
 
 ## Verify private API access safely
 
-Start with a read-only balance request for the configured exchange:
+Start with a read-only balance request for the configured exchange. These
+examples use the source command; standalone users should use `./hozamo` on
+Linux/macOS or `.\hozamo.exe` on Windows instead:
 
 ```bash
 node hozamo balance --exchange coinex --coin BTC,USDT
 ```
 
-On Windows PowerShell, use `.\hozamo.cmd` instead. Before submitting a real
-order, run the intended command with `--dryrun`. A dryrun performs private
-read-only calls and local validation but does not submit the order:
+On Windows PowerShell with the source package, use `.\hozamo.cmd` instead.
+Before submitting a real order, run the intended command with `--dryrun`. A
+dryrun performs private read-only calls and local validation but does not
+submit the order:
 
 ```bash
 node hozamo order --exchange coinex --type market --side sell --pair BTC-USDT --amount 0.001 --dryrun
@@ -360,7 +403,8 @@ test the smallest real order permitted by the selected exchange.
 
 ### Hozamo does not see `.env`
 
-Check the current directory and confirm that `.env` exists there:
+For a standalone installation, first confirm that `.env` exists beside the
+executable. Hozamo also checks the current directory:
 
 ```bash
 pwd

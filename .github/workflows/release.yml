@@ -20,7 +20,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Verify release version
@@ -48,6 +48,29 @@ jobs:
       - name: Run tests
         run: npm test
 
+      - name: Build Linux standalone executable
+        run: npm run build:standalone
+
+      - name: Smoke-test Linux standalone executable
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          test "$(./dist/hozamo --version)" = "$VERSION"
+          ./dist/hozamo --help > /dev/null
+
+      - name: Create Linux standalone archive
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          package_name="hozamo-v${VERSION}-linux-x64-standalone"
+          package_dir="release/${package_name}"
+
+          mkdir -p "$package_dir"
+          cp dist/hozamo .env.example LICENSE README.md "$package_dir/"
+          tar -C release -czf "${package_name}.tar.gz" "$package_name"
+
       - name: Keep production dependencies only
         run: npm prune --omit=dev
 
@@ -68,7 +91,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: release-linux
-          path: hozamo-v*-linux.tar.gz
+          path: |
+            hozamo-v*-linux.tar.gz
+            hozamo-v*-linux-x64-standalone.tar.gz
           if-no-files-found: error
           retention-days: 1
 
@@ -83,7 +108,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Verify release version
@@ -109,6 +134,35 @@ jobs:
 
       - name: Run tests
         run: npm test
+
+      - name: Build Windows standalone executable
+        run: npm run build:standalone
+
+      - name: Smoke-test Windows standalone executable
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $reportedVersion = & .\dist\hozamo.exe --version
+          if ($reportedVersion -ne $env:VERSION) {
+            throw "Standalone executable reports $reportedVersion instead of $env:VERSION"
+          }
+          & .\dist\hozamo.exe --help | Out-Null
+
+      - name: Create Windows standalone archive
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $packageName = "hozamo-v$env:VERSION-windows-x64-standalone"
+          $packageDir = Join-Path "release" $packageName
+
+          New-Item -ItemType Directory -Path $packageDir -Force | Out-Null
+          Copy-Item .\dist\hozamo.exe,.env.example,LICENSE,README.md -Destination $packageDir
+          Compress-Archive `
+            -Path $packageDir `
+            -DestinationPath "$packageName.zip" `
+            -CompressionLevel Optimal
 
       - name: Keep production dependencies only
         run: npm prune --omit=dev
@@ -147,7 +201,88 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: release-windows
-          path: hozamo-v*-windows.zip
+          path: |
+            hozamo-v*-windows.zip
+            hozamo-v*-windows-x64-standalone.zip
+          if-no-files-found: error
+          retention-days: 1
+
+  build-macos:
+    name: Build macOS ${{ matrix.arch }} standalone package
+    strategy:
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x64
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Verify release version and architecture
+        id: version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          package_version="$(node -p "require('./package.json').version")"
+          tag_version="${RELEASE_TAG#v}"
+          node_arch="$(node -p "process.arch")"
+
+          if [[ "$package_version" != "$tag_version" ]]; then
+            echo "::error::Tag $RELEASE_TAG does not match package.json version $package_version"
+            exit 1
+          fi
+
+          if [[ "$node_arch" != "$EXPECTED_ARCH" ]]; then
+            echo "::error::Runner provides $node_arch instead of $EXPECTED_ARCH"
+            exit 1
+          fi
+
+          echo "version=$package_version" >> "$GITHUB_OUTPUT"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build macOS standalone executable
+        run: npm run build:standalone
+
+      - name: Smoke-test macOS standalone executable
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          test "$(./dist/hozamo --version)" = "$VERSION"
+          ./dist/hozamo --help > /dev/null
+
+      - name: Create macOS standalone archive
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          package_name="hozamo-v${VERSION}-macos-${ARCH}-standalone"
+          package_dir="release/${package_name}"
+
+          mkdir -p "$package_dir"
+          cp dist/hozamo .env.example LICENSE README.md "$package_dir/"
+          tar -C release -czf "${package_name}.tar.gz" "$package_name"
+
+      - name: Upload macOS standalone archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-macos-${{ matrix.arch }}
+          path: hozamo-v*-macos-${{ matrix.arch }}-standalone.tar.gz
           if-no-files-found: error
           retention-days: 1
 
@@ -156,6 +291,7 @@ jobs:
     needs:
       - build-linux
       - build-windows
+      - build-macos
     runs-on: ubuntu-latest
     permissions:
       contents: write
