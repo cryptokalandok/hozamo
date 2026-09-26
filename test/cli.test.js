@@ -8,7 +8,7 @@ import { runCli } from '../src/cli.js';
 test('no command prints help instead of doing nothing', async () => {
   const result = await runWithClient([], {});
   assert.equal(result.code, 0);
-  assert.match(result.output, /Hozamo 0\.12\.0/);
+  assert.match(result.output, /Hozamo 0\.13\.0/);
   assert.match(result.output, /node hozamo price/);
 });
 
@@ -260,6 +260,124 @@ test('stats CSV contains only CSV with header, SUM and daily rows', async () => 
     '2026-08-29,0,0,2,0.5',
   ].join('\n'));
   assert.doesNotMatch(result.output, /Exchange:/);
+});
+
+test('stats --group-by week aggregates partial ISO weeks across a year boundary', async () => {
+  const result = await runWithClient(
+    [
+      'stats', '--coin', 'PEARL', '--from', '2026-12-30',
+      '--to', '2027-01-05', '--group-by', 'week', '--average-price',
+      '--format', 'csv',
+    ],
+    {
+      getAssetActivity: async () => ({
+        deposits: [
+          { timestamp: Date.parse('2026-12-30T01:00:00Z'), amount: '1' },
+          { timestamp: Date.parse('2027-01-02T01:00:00Z'), amount: '2' },
+          { timestamp: Date.parse('2027-01-04T01:00:00Z'), amount: '4' },
+        ],
+        withdrawals: [
+          { timestamp: Date.parse('2027-01-02T02:00:00Z'), amount: '0.5' },
+          { timestamp: Date.parse('2027-01-05T02:00:00Z'), amount: '1' },
+        ],
+        swaps: [
+          {
+            timestamp: Date.parse('2026-12-31T03:00:00Z'),
+            spentAmount: '2',
+            receivedAsset: 'USDT',
+            receivedAmount: '0.4',
+          },
+          {
+            timestamp: Date.parse('2027-01-04T03:00:00Z'),
+            spentAmount: '3',
+            receivedAsset: 'USDT',
+            receivedAmount: '0.9',
+          },
+        ],
+      }),
+    },
+  );
+
+  assert.equal(result.code, 0);
+  assert.equal(result.output, [
+    'ISO WEEK,DEPOSITED PEARL,WITHDRAWN PEARL,SWAPPED PEARL,RECEIVED USDT (GROSS),AVG SELL PRICE (USDT/PEARL)',
+    'SUM,7,1.5,5,1.3,0.26',
+    '2026-W53,3,0.5,2,0.4,0.2',
+    '2027-W01,4,1,3,0.9,0.3',
+  ].join('\n'));
+});
+
+test('stats --group-by month keeps partial and empty months in the selected range', async () => {
+  const result = await runWithClient(
+    [
+      'stats', '--coin', 'PEARL', '--from', '2026-08-30',
+      '--to', '2026-10-02', '--group-by', 'month', '--deposits-by-source',
+      '--format', 'csv',
+    ],
+    {
+      getAssetActivity: async () => ({
+        deposits: [
+          {
+            timestamp: Date.parse('2026-08-30T01:00:00Z'),
+            amount: '1',
+            sourceAddress: 'prl1puv0gqv4x0wd0ylwz086y3sqrg4a6umza9r08aecehjrmdqq7mctsmqaqsh',
+          },
+          {
+            timestamp: Date.parse('2026-09-01T01:00:00Z'),
+            amount: '2',
+            sourceAddress: 'prl1pksfzrn8g760gmcqy65a4tl30eyv25eksl5sf8y332kes6fwx9pjszgymmz',
+          },
+        ],
+        withdrawals: [],
+        swaps: [{
+          timestamp: Date.parse('2026-09-30T03:00:00Z'),
+          spentAmount: '3',
+          receivedAsset: 'USDT',
+          receivedAmount: '0.9',
+        }],
+      }),
+    },
+  );
+
+  assert.equal(result.code, 0);
+  assert.equal(result.output, [
+    'MONTH,DEPOSITED PEARL,FROM Kryptex,FROM HeroMiners,WITHDRAWN PEARL,SWAPPED PEARL,RECEIVED USDT (GROSS)',
+    'SUM,3,1,2,0,3,0.9',
+    '2026-08,1,1,0,0,0,0',
+    '2026-09,2,0,2,0,3,0.9',
+    '2026-10,0,0,0,0,0,0',
+  ].join('\n'));
+});
+
+test('stats --hide-withdrawals removes the column and hides withdrawal-only rows', async () => {
+  const result = await runWithClient(
+    [
+      'stats', '--coin', 'PEARL', '--from', '2026-08-28',
+      '--to', '2026-08-30', '--hide-withdrawals', '--hide-zero-days',
+      '--format', 'csv',
+    ],
+    {
+      getAssetActivity: async () => ({
+        deposits: [{
+          timestamp: Date.parse('2026-08-29T01:00:00Z'),
+          amount: '2',
+        }],
+        withdrawals: [{
+          timestamp: Date.parse('2026-08-28T01:00:00Z'),
+          amount: '5',
+        }],
+        swaps: [],
+      }),
+    },
+  );
+
+  assert.equal(result.code, 0);
+  assert.equal(result.output, [
+    'DATE,DEPOSITED PEARL,SWAPPED PEARL',
+    'SUM,2,0',
+    '2026-08-29,2,0',
+  ].join('\n'));
+  assert.doesNotMatch(result.output, /WITHDRAWN|2026-08-28/);
 });
 
 test('stats --average-price adds daily and weighted-period USDT sell prices', async () => {
@@ -542,10 +660,18 @@ test('stats validates period and output format options', async () => {
     ['stats', '--coin', 'PEARL', '--days', '7', '--format', 'json'],
     {},
   );
+  const invalidGroup = await runWithClient(
+    ['stats', '--coin', 'PEARL', '--days', '7', '--group-by', 'year'],
+    {},
+  );
 
   assert.match(missingTo.error, /--from and --to must be provided together/);
   assert.match(mixed.error, /either --days or the --from\/--to date range/);
   assert.match(invalidFormat.error, /--format is required and must be one of: table, csv/);
+  assert.match(
+    invalidGroup.error,
+    /--group-by is required and must be one of: day, week, month/,
+  );
 });
 
 test('market sell checks available balance and submits after --yes', async () => {

@@ -230,15 +230,37 @@ node hozamo stats \
 
 The default output is an aligned table. CSV output contains no explanatory
 text, so it can be redirected directly to a `.csv` file. In both formats the
-first data row is `SUM`, followed by one row for every UTC date in the selected
-period, including dates with no activity. Add `--hide-zero-days` to keep the
-`SUM` row but omit dates where every reported value is zero. This option works
-with both table and CSV output.
+first data row is `SUM`. By default it is followed by one row for every UTC
+date in the selected period, including dates with no activity.
+
+Use `--group-by week` for ISO weeks running Monday through Sunday, or
+`--group-by month` for UTC calendar months. Daily output remains the default:
+
+```bash
+node hozamo stats \
+  --exchange coinex \
+  --coin PEARL \
+  --from 2026-01-15 \
+  --to 2026-08-20 \
+  --group-by month
+```
+
+Grouping applies only inside the selected `--days` or inclusive `--from/--to`
+period. Consequently, the first and last weekly or monthly row may represent a
+partial period. Weekly row labels use the ISO week-year format such as
+`2026-W39`; monthly labels use `2026-09`.
+
+Add `--hide-zero-days` to keep the `SUM` row but omit output rows where every
+visible value is zero. Despite its original name, it also hides empty weeks or
+months when grouping is enabled. Add `--hide-withdrawals` to omit the complete
+`WITHDRAWN ...` column from table and CSV output. A period containing only a
+hidden withdrawal is considered empty by `--hide-zero-days`.
 
 The report contains:
 
 - credited deposits of the requested asset;
-- successful withdrawals of the requested asset;
+- successful withdrawals of the requested asset, unless hidden with
+  `--hide-withdrawals`;
 - completed spot executions that spend the requested asset;
 - one gross `RECEIVED ...` column for every asset received by those swaps.
 
@@ -260,14 +282,15 @@ node hozamo stats \
   --average-price-decimals 8
 ```
 
-For each UTC date, `AVG SELL PRICE (USDT/PEARL)` is calculated as the gross
-USDT received divided by the PEARL amount spent in those USDT trades. The
-`SUM` row uses the totals for the complete period, so it is a volume-weighted
-average rather than an average of the daily prices. Swaps that receive BTC or
-another asset do not affect the USDT average. A row without a USDT trade shows
-`N/A`. The calculation uses exact decimal arithmetic and returns up to 5
-decimal places by default. Set `--average-price-decimals` to an integer from 0
-to 100 to change that precision; the option can only be used together with
+For each output row, `AVG SELL PRICE (USDT/PEARL)` is calculated as the gross
+USDT received divided by the PEARL amount spent in those USDT trades. This is a
+daily, weekly or monthly weighted average according to `--group-by`. The `SUM`
+row uses the totals for the complete period, so it is a volume-weighted average
+rather than an average of the displayed rows. Swaps that receive BTC or another
+asset do not affect the USDT average. A row without a USDT trade shows `N/A`.
+The calculation uses exact decimal arithmetic and returns up to 5 decimal
+places by default. Set `--average-price-decimals` to an integer from 0 to 100 to
+change that precision; the option can only be used together with
 `--average-price`.
 
 SafeTrade deposits can also be split into source columns:

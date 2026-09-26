@@ -172,10 +172,16 @@ export function aggregateAssetStatistics({
   startTime,
   endTime,
   activity,
+  groupBy = 'day',
 }) {
   const asset = normalizeAsset(coin);
   if (!Number.isFinite(startTime) || !Number.isFinite(endTime) || startTime >= endTime) {
     throw new HozamoValidationError('Statistics period is invalid');
+  }
+  if (!['day', 'week', 'month'].includes(groupBy)) {
+    throw new HozamoValidationError(
+      '--group-by must be one of: day, week, month',
+    );
   }
 
   const rowsByDate = new Map();
@@ -215,39 +221,60 @@ export function aggregateAssetStatistics({
     );
   }
 
-  const rows = [...rowsByDate.values()];
+  const dailyRows = [...rowsByDate.values()];
+  const rows = groupStatisticsRows(dailyRows, groupBy);
   const receivedAssets = [...new Set(rows.flatMap((row) => (
     [...row.received.keys()]
   )))].sort();
   const sum = emptyRow('SUM');
   for (const row of rows) {
-    sum.deposited = addDecimals(sum.deposited, row.deposited);
-    sum.withdrawn = addDecimals(sum.withdrawn, row.withdrawn);
-    sum.swapped = addDecimals(sum.swapped, row.swapped);
-    for (const [receivedAsset, amount] of row.swappedByReceivedAsset) {
-      sum.swappedByReceivedAsset.set(
-        receivedAsset,
-        addDecimals(sum.swappedByReceivedAsset.get(receivedAsset) ?? '0', amount),
-      );
-    }
-    for (const [sourceAddress, amount] of row.depositedBySource) {
-      sum.depositedBySource.set(
-        sourceAddress,
-        addDecimals(sum.depositedBySource.get(sourceAddress) ?? '0', amount),
-      );
-    }
-    for (const receivedAsset of receivedAssets) {
-      sum.received.set(
-        receivedAsset,
-        addDecimals(
-          sum.received.get(receivedAsset) ?? '0',
-          row.received.get(receivedAsset) ?? '0',
-        ),
-      );
-    }
+    mergeStatisticsRow(sum, row);
   }
 
-  return { coin: asset, receivedAssets, sum, rows };
+  return { coin: asset, groupBy, receivedAssets, sum, rows };
+}
+
+function groupStatisticsRows(rows, groupBy) {
+  if (groupBy === 'day') {
+    return rows;
+  }
+
+  const groupedRows = new Map();
+  for (const row of rows) {
+    const label = groupBy === 'week'
+      ? formatIsoWeek(row.date)
+      : row.date.slice(0, 7);
+    if (!groupedRows.has(label)) {
+      groupedRows.set(label, emptyRow(label));
+    }
+    mergeStatisticsRow(groupedRows.get(label), row);
+  }
+  return [...groupedRows.values()];
+}
+
+function mergeStatisticsRow(target, source) {
+  target.deposited = addDecimals(target.deposited, source.deposited);
+  target.withdrawn = addDecimals(target.withdrawn, source.withdrawn);
+  target.swapped = addDecimals(target.swapped, source.swapped);
+  mergeDecimalMap(target.depositedBySource, source.depositedBySource);
+  mergeDecimalMap(target.swappedByReceivedAsset, source.swappedByReceivedAsset);
+  mergeDecimalMap(target.received, source.received);
+}
+
+function mergeDecimalMap(target, source) {
+  for (const [key, amount] of source) {
+    target.set(key, addDecimals(target.get(key) ?? '0', amount));
+  }
+}
+
+function formatIsoWeek(date) {
+  const value = new Date(`${date}T00:00:00.000Z`);
+  const day = value.getUTCDay() || 7;
+  value.setUTCDate(value.getUTCDate() + 4 - day);
+  const weekYear = value.getUTCFullYear();
+  const yearStart = Date.UTC(weekYear, 0, 1);
+  const week = Math.ceil((((value.getTime() - yearStart) / DAY_MS) + 1) / 7);
+  return `${weekYear}-W${String(week).padStart(2, '0')}`;
 }
 
 function normalizeTransfer(item, kind, preferredAmount, sourceAddress) {

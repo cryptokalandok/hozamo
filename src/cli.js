@@ -52,7 +52,7 @@ const DEFAULT_AVERAGE_PRICE_DECIMALS = 5;
 const MAX_AVERAGE_PRICE_DECIMALS = 100;
 const BOOLEAN_OPTIONS = new Set([
   'help', 'yes', 'dryrun', 'debug', 'hide-zero-days', 'deposits-by-source',
-  'average-price',
+  'average-price', 'hide-withdrawals',
 ]);
 
 export async function runCli(argv, dependencies = {}) {
@@ -133,7 +133,7 @@ export async function runCli(argv, dependencies = {}) {
         assertKnownOptions(options, [
           'exchange', 'coin', 'days', 'from', 'to', 'format',
           'hide-zero-days', 'deposits-by-source', 'average-price',
-          'average-price-decimals', 'debug',
+          'average-price-decimals', 'group-by', 'hide-withdrawals', 'debug',
         ]);
         await printStatistics(client, options, {
           stdout,
@@ -247,8 +247,14 @@ async function printStatistics(
     'format',
     ['table', 'csv'],
   );
+  const groupBy = normalizeChoice(
+    options['group-by'] ?? 'day',
+    'group-by',
+    ['day', 'week', 'month'],
+  );
   const depositsBySource = options['deposits-by-source'] === true;
   const averagePrice = options['average-price'] === true;
+  const hideWithdrawals = options['hide-withdrawals'] === true;
   const averagePriceDecimals = normalizeAveragePriceDecimals(
     options['average-price-decimals'],
     averagePrice,
@@ -278,27 +284,30 @@ async function printStatistics(
     startTime: period.startTime,
     endTime: period.endTime,
     activity,
+    groupBy,
   });
   const sourceColumns = depositsBySource
     ? buildDepositSourceColumns(report.rows, sourceBook)
     : [];
   const headers = [
-    'DATE',
+    statisticsPeriodHeader(groupBy),
     `DEPOSITED ${coin}`,
     ...sourceColumns.map(({ label }) => `FROM ${label}`),
-    `WITHDRAWN ${coin}`,
+    ...(hideWithdrawals ? [] : [`WITHDRAWN ${coin}`]),
     `SWAPPED ${coin}`,
     ...report.receivedAssets.map((asset) => `RECEIVED ${asset} (GROSS)`),
     ...(averagePrice ? [`AVG SELL PRICE (USDT/${coin})`] : []),
   ];
-  const dailyRows = options['hide-zero-days']
-    ? report.rows.filter(statisticsRowHasActivity)
+  const periodRows = options['hide-zero-days']
+    ? report.rows.filter((row) => (
+      statisticsRowHasActivity(row, { includeWithdrawals: !hideWithdrawals })
+    ))
     : report.rows;
-  const rows = [report.sum, ...dailyRows].map((row) => [
+  const rows = [report.sum, ...periodRows].map((row) => [
     row.date,
     row.deposited,
     ...sourceColumns.map((column) => depositSourceAmount(row, column)),
-    row.withdrawn,
+    ...(hideWithdrawals ? [] : [row.withdrawn]),
     row.swapped,
     ...report.receivedAssets.map((asset) => row.received.get(asset) ?? '0'),
     ...(averagePrice
@@ -314,16 +323,31 @@ async function printStatistics(
   stdout(`Exchange: ${client.displayName ?? client.exchange}`);
   stdout(`Asset: ${coin}`);
   stdout(`Period: ${period.from} to ${period.to} (UTC, inclusive)`);
+  if (groupBy === 'week') {
+    stdout('Grouping: ISO week (Monday to Sunday, UTC)');
+  } else if (groupBy === 'month') {
+    stdout('Grouping: calendar month (UTC)');
+  }
   printTable(headers, rows, stdout);
 }
 
-function statisticsRowHasActivity(row) {
+function statisticsRowHasActivity(row, { includeWithdrawals = true } = {}) {
   return [
     row.deposited,
-    row.withdrawn,
+    ...(includeWithdrawals ? [row.withdrawn] : []),
     row.swapped,
     ...row.received.values(),
   ].some((value) => compareDecimals(value, '0') !== 0);
+}
+
+function statisticsPeriodHeader(groupBy) {
+  if (groupBy === 'week') {
+    return 'ISO WEEK';
+  }
+  if (groupBy === 'month') {
+    return 'MONTH';
+  }
+  return 'DATE';
 }
 
 function formatAverageSalePrice(row, decimals) {
@@ -947,7 +971,7 @@ Commands:
   price      Show the last traded price for a pair
   status     Show asset and network deposit/withdrawal status
   balance    Show total, available and locked balances
-  stats      Show daily deposit, withdrawal and swap statistics
+  stats      Show deposit, withdrawal and swap statistics
   order      Validate and submit a market or limit order
 
 Examples:
@@ -955,6 +979,7 @@ Examples:
   ${CLI_INVOCATION} status --exchange coinex --coin PEARL,USDT
   ${CLI_INVOCATION} balance --exchange coinex --coin QUAI,RVN
   ${CLI_INVOCATION} stats --exchange coinex --coin PEARL --days 30
+  ${CLI_INVOCATION} stats --exchange coinex --coin PEARL --days 90 --group-by week
   ${CLI_INVOCATION} stats --exchange coinex --coin PEARL --days 30 --average-price
   ${CLI_INVOCATION} stats --exchange safetrade --coin PEARL --from 2026-08-01 --to 2026-08-31 --format csv
   ${CLI_INVOCATION} order --exchange coinex --type market --side sell --pair BTC-USDT --amount 0.001
@@ -985,7 +1010,11 @@ Period (use exactly one form):
 Options:
   --format table        Aligned table output (default)
   --format csv          CSV written to stdout
-  --hide-zero-days      Omit UTC dates where every value is zero
+  --group-by day        One row per UTC day (default)
+  --group-by week       One row per ISO week (Monday to Sunday, UTC)
+  --group-by month      One row per UTC calendar month
+  --hide-zero-days      Omit output periods where every visible value is zero
+  --hide-withdrawals    Do not include the withdrawal column
   --deposits-by-source  Add one deposit column for each SafeTrade source address
   --average-price       Add the weighted average USDT sell price
   --average-price-decimals 5
@@ -994,6 +1023,9 @@ Options:
 Only credited deposits and successful withdrawals are included. Swaps are
 completed trades that spend the requested coin. Received amounts are gross and
 are reported in separate columns for each received asset.
+
+Grouping never expands the selected period. Partial weeks or months at the
+--from/--to boundaries contain only dates inside that inclusive UTC range.
 
 --deposits-by-source is supported by SafeTrade only. Known pool names are
 resolved from the built-in and HOZAMO_DEPOSIT_SOURCES address books.
