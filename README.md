@@ -345,10 +345,14 @@ Add 2 PEARL to the existing reserve:
 node hozamo treasury add --exchange safetrade --coin PEARL --amount 2
 ```
 
-Each successful invocation adds the requested amount once. `add` checks the
-exchange's **available** balance: the existing reserve plus the new amount must
-fit within it. Funds locked in open orders cannot be reserved. Insufficient
-funds or an API error leave the treasury unchanged; there is no deferred debt.
+Each successful invocation adds the requested amount once to a **reserve target**.
+`add` works offline and does not check the exchange balance. The target may exceed
+the funds currently available: orders can spend only
+`max(0, available balance - treasury target)`. Future deposits make the excess
+above that target spendable; they do not change the target itself.
+For example, a target of 2 PEARL protects all of an available 1.9921177 PEARL.
+When the available balance reaches 5 PEARL, a 100% balance order can spend 3 PEARL
+(subject to exchange precision and minimum-order rules).
 Repeated invocations are separate additions, including reruns of the same cron
 job. There is no built-in daily deduplication or scheduler.
 
@@ -370,7 +374,7 @@ node hozamo treasury free --exchange safetrade --coin PEARL --amount-percentage 
 
 `free` accepts exactly one selector. Percentages must be greater than 0 and at
 most 100, and refer to the **treasury balance**, not the exchange balance.
-Releasing more than is reserved is rejected. `free` and `show` work without API
+Releasing more than is reserved is rejected. `add`, `free` and `show` work without API
 credentials or network access. Releasing funds only makes them eligible for a
 subsequent order; it does not itself sell or withdraw anything.
 

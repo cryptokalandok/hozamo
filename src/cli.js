@@ -119,9 +119,9 @@ export async function runCli(argv, dependencies = {}) {
       now: dependencies.now ?? Date.now,
       stdout,
     };
-    // Local inspection/release must work without API credentials or network access.
-    if (command === 'treasury' && treasuryAction !== 'add') {
-      await manageTreasury(null, treasuryAction, options, treasuryContext);
+    // Treasury targets are local bookkeeping, independent of available exchange funds.
+    if (command === 'treasury') {
+      await manageTreasury(treasuryAction, options, treasuryContext);
       return 0;
     }
     const clientFactory = dependencies.clientFactory ?? ((clientOptions) => (
@@ -139,9 +139,6 @@ export async function runCli(argv, dependencies = {}) {
     });
 
     switch (command) {
-      case 'treasury':
-        await manageTreasury(client, treasuryAction, options, treasuryContext);
-        return 0;
       case 'price':
         assertKnownOptions(options, ['exchange', 'pair', 'debug']);
         await printPrice(client, options, stdout);
@@ -201,7 +198,7 @@ export async function runCli(argv, dependencies = {}) {
   }
 }
 
-async function manageTreasury(client, action, options, { path, exchange, now, stdout }) {
+async function manageTreasury(action, options, { path, exchange, now, stdout }) {
   if (!['add', 'free', 'show'].includes(action)) {
     throw new HozamoValidationError('Use treasury add, treasury free or treasury show; see treasury --help');
   }
@@ -241,16 +238,6 @@ async function manageTreasury(client, action, options, { path, exchange, now, st
     if (compareDecimals(amount, '0') === 0) {
       stdout(`Treasury is already empty for ${exchange}/${coin}; nothing to free.`);
       return;
-    }
-    if (action === 'add') {
-      const balance = await client.getBalance(coin);
-      const available = balance?.available ?? '0';
-      const target = addDecimals(current, amount);
-      if (compareDecimals(target, available) > 0) {
-        throw new HozamoValidationError(
-          `Cannot reserve ${amount} ${coin}: ${available} available, ${current} already in treasury`,
-        );
-      }
     }
     const after = recordTreasury(state, {
       exchange, coin, action, amount, at: new Date(now()).toISOString(),
@@ -1171,7 +1158,8 @@ function commandHelp(command) {
   ${CLI_INVOCATION} treasury show --exchange safetrade --coin PEARL
 
 Treasury is a local trading reserve, not an exchange transfer or staking product.
-Add checks available exchange funds; free/show work offline. Each add invocation
+Add/free/show work offline. The reserve target may exceed available exchange funds.
+Orders can spend only the available balance above this target. Each add invocation
 adds once: cron controls the schedule. Free accepts exactly one amount selector.
 Balances and the UTC ledger live in treasury.json beside Hozamo (project root
 for Node). HOZAMO_TREASURY_FILE overrides this path. Back up this file and keep

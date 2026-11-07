@@ -82,19 +82,44 @@ test('exchange and coin reserves are independent', async (t) => {
   });
 });
 
-test('add cannot reserve locked/missing funds or count an existing reserve twice as spendable', async (t) => {
-  const f = fixture(t, { getBalance: async () => ({ available: '3', locked: '10', total: '13' }) });
-  await f.reserve('2');
-  const before = readFileSync(f.path, 'utf8');
-  let result = await f.run(['treasury', 'add', '--coin', 'PEARL', '--amount', '2']);
-  assert.equal(result.code, 1);
-  assert.match(result.error, /3 available, 2 already/);
-  assert.equal(readFileSync(f.path, 'utf8'), before);
-  f.client.getBalance = async () => undefined;
-  result = await f.run(['treasury', 'add', '--coin', 'BTC', '--amount', '1']);
-  assert.equal(result.code, 1);
-  assert.equal(readFileSync(f.path, 'utf8'), before);
+test('add accumulates an unfunded target offline without creating an API client', async (t) => {
+  const f = fixture(t);
+  const offline = { clientFactory: () => { throw new Error('Must not create an API client'); } };
+  for (const exchange of ['safetrade', 'coinex']) {
+    for (let i = 0; i < 2; i += 1) {
+      const result = await f.run(['treasury', 'add', '--exchange', exchange,
+        '--coin', 'PEARL', '--amount', '2'], offline);
+      assert.equal(result.code, 0, result.error);
+    }
+    assert.equal(treasuryBalance(await f.state(), exchange, 'PEARL'), '4');
+  }
+  assert.equal((await f.state()).ledger.length, 4);
 });
+
+for (const exchange of ['safetrade', 'coinex']) {
+  for (const type of ['market', 'limit']) {
+    test(`${exchange} ${type} order protects an unfunded target until deposits exceed it`, async (t) => {
+      let available = '1.9921177';
+      const f = fixture(t, { getBalance: async () => ({ available }) });
+      await f.reserve('2', exchange);
+      const args = ['order', '--exchange', exchange, '--type', type, '--side', 'sell',
+        '--pair', 'PEARL-USDT', '--balance-percent', '100', '--yes',
+        ...(type === 'limit' ? ['--price-percent', '0'] : [])];
+      for (const balance of ['1.9921177', '0', '2']) {
+        available = balance;
+        assert.equal((await f.run(args)).code, 1);
+        assert.equal(f.orders.length, 0);
+      }
+      available = '5';
+      const result = await f.run(args);
+      assert.equal(result.code, 0, result.error);
+      assert.equal(f.orders.length, 1);
+      assert.equal(f.orders[0].amount, '3');
+      assert.equal(treasuryBalance(await f.state(), exchange, 'PEARL'), '2');
+      assert.equal((await f.state()).ledger.length, 1);
+    });
+  }
+}
 
 test('invalid selectors and over-release leave the ledger unchanged', async (t) => {
   const f = fixture(t);
