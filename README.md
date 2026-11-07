@@ -152,6 +152,8 @@ Optional variables:
 
 ```dotenv
 HOZAMO_BUY_RESERVE_PERCENT=0.5
+# Optional persistent path; its parent directory must already exist:
+# HOZAMO_TREASURY_FILE=/var/lib/hozamo/treasury.json
 HOZAMO_TIMEOUT_MS=15000
 SAFETRADE_BASE_URL=https://safe.trade/api/v2
 COINEX_BASE_URL=https://api.coinex.com/v2
@@ -328,6 +330,139 @@ original transfer date. CoinEx does not provide transfer date filters. Hozamo
 therefore paginates deposit and withdrawal histories on both exchanges and
 applies the requested UTC period locally. Execution histories use each
 exchange's server-side date filters.
+
+### Treasury: accumulate a local reserve
+
+Treasury keeps part of your exchange balance out of automated orders. It is
+local bookkeeping: it does not move coins, stake them or lock them on the
+exchange. SafeTrade and CoinEx balances are tracked separately, by coin ticker.
+Use the exact current ticker used by `balance` and `order` (for example PEARL,
+not its former PRL ticker); treasury entries are not automatically renamed.
+
+Add 2 PEARL to the existing reserve:
+
+```bash
+node hozamo treasury add --exchange safetrade --coin PEARL --amount 2
+```
+
+Each successful invocation adds the requested amount once. `add` checks the
+exchange's **available** balance: the existing reserve plus the new amount must
+fit within it. Funds locked in open orders cannot be reserved. Insufficient
+funds or an API error leave the treasury unchanged; there is no deferred debt.
+Repeated invocations are separate additions, including reruns of the same cron
+job. There is no built-in daily deduplication or scheduler.
+
+For example, run a standalone installation once a day at 06:00 in the cron
+host's timezone (replace the paths with your installation):
+
+```cron
+0 6 * * * cd /opt/hozamo && ./hozamo treasury add --exchange safetrade --coin PEARL --amount 2 >> /opt/hozamo/treasury.log 2>&1
+```
+
+Inspect the reserve, release a fixed amount, release half, or release everything:
+
+```bash
+node hozamo treasury show --exchange safetrade --coin PEARL
+node hozamo treasury free --exchange safetrade --coin PEARL --amount 1
+node hozamo treasury free --exchange safetrade --coin PEARL --amount-percentage 50
+node hozamo treasury free --exchange safetrade --coin PEARL --amount-percentage 100
+```
+
+`free` accepts exactly one selector. Percentages must be greater than 0 and at
+most 100, and refer to the **treasury balance**, not the exchange balance.
+Releasing more than is reserved is rejected. `free` and `show` work without API
+credentials or network access. Releasing funds only makes them eligible for a
+subsequent order; it does not itself sell or withdraw anything.
+
+#### Storage, scheduling and upgrades
+
+The default file is `treasury.json` in the Node.js project root, or beside the
+standalone executable. It does not depend on the working directory. Override
+it with `HOZAMO_TREASURY_FILE`; relative paths resolve from that same installation
+directory. Prefer a stable absolute path for versioned release directories.
+The parent directory must exist and be writable by the account running Hozamo.
+The existing `.env` discovery rules above still apply to credentials and overrides.
+
+The JSON contains `version`, current `balances` by exchange/coin, and an append-only
+`ledger`. Each entry has a unique ID, UTC `at` timestamp, `exchange`, `coin`,
+`action` (`add`, `free` or `ignore`), decimal-string `amount`, `before` and `after`.
+An `ignore` entry also records the accepted order ID. All arithmetic is decimal;
+financial amounts are never converted to JavaScript floating-point numbers.
+
+Keep a backup and preserve the file when upgrading or moving the installation.
+A missing file means an empty treasury; a corrupted file or an inconsistent
+ledger stops trading, including `--ignore-treasury`. Do not edit balances alone
+or delete the file to release funds: use `treasury free` to preserve the ledger.
+The file is ignored by Git and is never bundled into releases.
+
+One file represents **one account per exchange**. Changing API keys to a different
+account requires a different treasury path. Instances with separate files do
+not share their reserves. Processes on one host managing the same account
+should use the same file; do not run independent treasury files for that account.
+External tools, manual trades and withdrawals are not controlled by this local
+reserve and do not update its ledger.
+
+Updates use a temporary file and atomic rename. Mutations and all CLI orders
+hold an exclusive `treasury.json.lock` through balance lookup and order submission.
+An overlapping command exits with a lock error without submitting an order or
+modifying the ledger; schedule jobs apart or retry later. A crashed process can
+leave a lock behind. Only remove it after verifying the process has stopped and
+checking the exchange for any order it may have submitted. Locks are never
+automatically stolen based on age. Use a local filesystem, not a network share.
+
+#### Order protection and explicit override
+
+All CLI orders automatically account for the treasury of the **spent asset**:
+base coin for sells, quote coin for buys. With 10 PEARL available and 2 reserved,
+`--balance-percent 100` sells at most 8 PEARL; 50% sells at most 4. Existing
+precision rounding and exchange minimum-order validation still apply. Exact
+`--amount` or `--receive` orders that exceed the spendable amount are rejected,
+not silently resized. A fully reserved or externally depleted balance cannot
+produce a normal sell order.
+
+Buy calculations use the remaining quote balance and retain the existing buy
+fee reserve. A base-denominated market buy is rejected when quote funds are
+reserved because its final cost is unknown. Use a limit buy, a supported
+quote-budget market buy, or explicitly release the quote reserve. Protection
+limits the order principal; exchange fees are still subject to exchange rules.
+The low-level exported API clients do not read this CLI-local treasury file.
+
+To explicitly bypass the reserve:
+
+```bash
+node hozamo order --exchange safetrade --type limit --side sell \
+  --pair PEARL-USDT --balance-percent 100 --price-percent 0 \
+  --ignore-treasury --dryrun
+```
+
+Replace `--dryrun` with `--yes` to submit without interactive confirmation.
+`--ignore-treasury` always prints a warning, including with `--yes`. It does not
+skip confirmation by itself. Once the exchange accepts the order with an ID,
+the **entire reserve for that exchange and spent coin** is reset to zero and
+logged, even if the order spends only part of it. Other coins/exchanges are
+unchanged. Accepted pending/open limit orders also trigger the reset; a later
+cancellation does not automatically restore the reserve.
+
+Dry runs, declined confirmations, validation failures, rejected orders and API
+errors never reset the reserve. A network timeout can leave order acceptance
+unknown: check the exchange before retrying. Exchange submission and local file
+storage cannot be one atomic transaction. If the order is accepted but saving
+the reset fails, Hozamo reports the accepted order ID and exits with an error.
+Do not resubmit it; reconcile using `treasury free` after checking the exchange.
+A crash between acceptance and saving likewise requires reconciliation.
+
+#### Treasury in statistics
+
+```bash
+node hozamo stats --exchange safetrade --coin PEARL --days 30 --treasury
+node hozamo stats --exchange safetrade --coin PEARL --days 30 --treasury --format csv
+```
+
+`--treasury` adds `TREASURY NOW <coin>` to both table and CSV output. Only the
+`SUM` row contains the current local balance; day/week/month rows leave that
+column empty. This is a current snapshot, independent of `--from`, `--to` and
+`--days`, not a historical balance or a sum of daily holdings. Treasury-only
+changes do not make a zero-activity day appear with `--hide-zero-days`.
 
 ### Market order
 
@@ -522,6 +657,9 @@ functions or fake clients and verify:
 - CLI parsing, help, human-readable output, confirmation and dryrun behavior;
 - concise handling of SafeTrade/Cloudflare HTTP 403 pages;
 - structured SafeTrade and CoinEx API errors.
+- treasury accumulation/release, ledger consistency, order protection and override;
+- treasury locking across commands/processes and unchanged state after failures;
+- current treasury snapshots in table/CSV statistics.
 
 For a fast syntax-only check, run:
 

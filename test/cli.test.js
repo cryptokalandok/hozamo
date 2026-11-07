@@ -8,7 +8,7 @@ import { runCli } from '../src/cli.js';
 test('no command prints help instead of doing nothing', async () => {
   const result = await runWithClient([], {});
   assert.equal(result.code, 0);
-  assert.match(result.output, /Hozamo 0\.13\.0/);
+  assert.match(result.output, /Hozamo 0\.14\.0/);
   assert.match(result.output, /node hozamo price/);
 });
 
@@ -1086,15 +1086,22 @@ test('--debug prints the failed API request without authentication headers', asy
 async function runWithClient(args, client, extra = {}) {
   const stdout = [];
   const stderr = [];
-  const code = await runCli(args, {
-    clientFactory: () => client,
-    stdout: (line) => stdout.push(line),
-    stderr: (line) => stderr.push(line),
-    env: {},
-    setDnsResultOrder: () => {},
-    cwd: '/directory-that-does-not-exist',
-    ...extra,
-  });
+  const instanceDir = mkdtempSync(join(tmpdir(), 'hozamo-cli-test-'));
+  let code;
+  try {
+    code = await runCli(args, {
+      instanceDir,
+      clientFactory: () => client,
+      stdout: (line) => stdout.push(line),
+      stderr: (line) => stderr.push(line),
+      env: {},
+      setDnsResultOrder: () => {},
+      cwd: '/directory-that-does-not-exist',
+      ...extra,
+    });
+  } finally {
+    rmSync(instanceDir, { recursive: true, force: true });
+  }
   return {
     code,
     output: stdout.join('\n'),

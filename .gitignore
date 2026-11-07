@@ -3,3 +3,6 @@ node_modules/
 dist/
 coverage/
 *.log
+treasury.json
+treasury.json.lock
+treasury.json.*.tmp

@@ -1,8 +1,10 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline/promises';
 import { stdin as processStdin, stdout as processStdout } from 'node:process';
 import {
+  addDecimals,
   applyPercent,
   compareDecimals,
   divideDecimals,
@@ -30,6 +32,7 @@ import {
   splitPair,
 } from './normalizers.js';
 import { configureDnsResultOrder } from './network.js';
+import { readTreasury, recordTreasury, treasuryBalance, withTreasury } from './treasury.js';
 import {
   aggregateAssetStatistics,
   resolveStatisticsPeriod,
@@ -47,12 +50,15 @@ const VERSION = typeof __HOZAMO_VERSION__ === 'string'
 const CLI_INVOCATION = STANDALONE
   ? (process.platform === 'win32' ? 'hozamo.exe' : './hozamo')
   : 'node hozamo';
+const INSTANCE_DIR = STANDALONE
+  ? dirname(process.execPath)
+  : resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_BUY_RESERVE_PERCENT = '0.5';
 const DEFAULT_AVERAGE_PRICE_DECIMALS = 5;
 const MAX_AVERAGE_PRICE_DECIMALS = 100;
 const BOOLEAN_OPTIONS = new Set([
   'help', 'yes', 'dryrun', 'debug', 'hide-zero-days', 'deposits-by-source',
-  'average-price', 'hide-withdrawals',
+  'average-price', 'hide-withdrawals', 'ignore-treasury', 'treasury',
 ]);
 
 export async function runCli(argv, dependencies = {}) {
@@ -79,7 +85,10 @@ export async function runCli(argv, dependencies = {}) {
     }
 
     const command = argv[0];
-    const options = parseOptions(argv.slice(1));
+    const treasuryAction = command === 'treasury' && argv[1] && !argv[1].startsWith('-')
+      ? argv[1]
+      : undefined;
+    const options = parseOptions(argv.slice(treasuryAction ? 2 : 1));
     debug = debug || options.debug === true;
 
     if (options.help) {
@@ -102,6 +111,19 @@ export async function runCli(argv, dependencies = {}) {
     const exchange = normalizeExchangeName(
       options.exchange ?? config.HOZAMO_EXCHANGE ?? 'safetrade',
     );
+    const instanceDir = dependencies.instanceDir ?? executableDir ?? INSTANCE_DIR;
+    const treasuryPath = resolve(instanceDir, config.HOZAMO_TREASURY_FILE || 'treasury.json');
+    const treasuryContext = {
+      path: treasuryPath,
+      exchange,
+      now: dependencies.now ?? Date.now,
+      stdout,
+    };
+    // Local inspection/release must work without API credentials or network access.
+    if (command === 'treasury' && treasuryAction !== 'add') {
+      await manageTreasury(null, treasuryAction, options, treasuryContext);
+      return 0;
+    }
     const clientFactory = dependencies.clientFactory ?? ((clientOptions) => (
       createExchangeClient(clientOptions)
     ));
@@ -117,6 +139,9 @@ export async function runCli(argv, dependencies = {}) {
     });
 
     switch (command) {
+      case 'treasury':
+        await manageTreasury(client, treasuryAction, options, treasuryContext);
+        return 0;
       case 'price':
         assertKnownOptions(options, ['exchange', 'pair', 'debug']);
         await printPrice(client, options, stdout);
@@ -133,22 +158,24 @@ export async function runCli(argv, dependencies = {}) {
         assertKnownOptions(options, [
           'exchange', 'coin', 'days', 'from', 'to', 'format',
           'hide-zero-days', 'deposits-by-source', 'average-price',
-          'average-price-decimals', 'group-by', 'hide-withdrawals', 'debug',
+          'average-price-decimals', 'group-by', 'hide-withdrawals', 'treasury', 'debug',
         ]);
         await printStatistics(client, options, {
           stdout,
           now: dependencies.now ?? Date.now,
           exchange,
           depositSources: config.HOZAMO_DEPOSIT_SOURCES,
+          treasuryPath,
         });
         return 0;
       case 'order':
         assertKnownOptions(options, [
           'exchange', 'type', 'side', 'order', 'pair', 'amount', 'price',
           'balance-percent', 'receive', 'reserve-percent', 'price-percent', 'yes',
-          'dryrun', 'debug',
+          'dryrun', 'ignore-treasury', 'debug',
         ]);
-        await submitOrder(client, options, {
+        await submitTreasuryOrder(client, options, {
+          ...treasuryContext,
           stdout,
           confirm: dependencies.confirm ?? defaultConfirm,
           buyReservePercent: config.HOZAMO_BUY_RESERVE_PERCENT,
@@ -172,6 +199,138 @@ export async function runCli(argv, dependencies = {}) {
     }
     return 1;
   }
+}
+
+async function manageTreasury(client, action, options, { path, exchange, now, stdout }) {
+  if (!['add', 'free', 'show'].includes(action)) {
+    throw new HozamoValidationError('Use treasury add, treasury free or treasury show; see treasury --help');
+  }
+  assertKnownOptions(options, [
+    'exchange', 'coin', 'debug',
+    ...(action === 'show' ? [] : ['amount']),
+    ...(action === 'free' ? ['amount-percentage'] : []),
+  ]);
+  requireOption(options.coin, '--coin');
+  const coin = normalizeAsset(options.coin);
+  if (action === 'show') {
+    const state = await readTreasury(path);
+    stdout(`Treasury file: ${path}`);
+    printTable(['EXCHANGE', 'ASSET', 'TREASURY'], [
+      [exchange, coin, treasuryBalance(state, exchange, coin)],
+    ], stdout);
+    return;
+  }
+  if (Number(options.amount !== undefined) + Number(options['amount-percentage'] !== undefined) !== 1) {
+    throw new HozamoValidationError(action === 'add'
+      ? 'treasury add requires --amount'
+      : 'treasury free requires exactly one of --amount or --amount-percentage');
+  }
+  const exactAmount = options.amount === undefined
+    ? undefined
+    : normalizePositiveDecimal(options.amount, 'amount');
+  const percent = options['amount-percentage'] === undefined
+    ? undefined
+    : normalizePositiveDecimal(options['amount-percentage'], 'amount-percentage');
+  if (percent !== undefined && compareDecimals(percent, '100') > 0) {
+    throw new HozamoValidationError('--amount-percentage must be greater than 0 and at most 100');
+  }
+  await withTreasury(path, async (state, save) => {
+    const current = treasuryBalance(state, exchange, coin);
+    // Multiplication keeps this exact, including a 100% release of tiny balances.
+    const amount = exactAmount ?? multiplyDecimals(current, multiplyDecimals(percent, '0.01'));
+    if (compareDecimals(amount, '0') === 0) {
+      stdout(`Treasury is already empty for ${exchange}/${coin}; nothing to free.`);
+      return;
+    }
+    if (action === 'add') {
+      const balance = await client.getBalance(coin);
+      const available = balance?.available ?? '0';
+      const target = addDecimals(current, amount);
+      if (compareDecimals(target, available) > 0) {
+        throw new HozamoValidationError(
+          `Cannot reserve ${amount} ${coin}: ${available} available, ${current} already in treasury`,
+        );
+      }
+    }
+    const after = recordTreasury(state, {
+      exchange, coin, action, amount, at: new Date(now()).toISOString(),
+    });
+    await save();
+    stdout(`Treasury ${action}: ${amount} ${coin} (${exchange}); balance ${current} -> ${after}`);
+    stdout(`Treasury file: ${path}`);
+  });
+}
+
+async function submitTreasuryOrder(client, options, context) {
+  const { path, exchange, stdout, now } = context;
+  const pair = normalizeDisplayPair(options.pair);
+  const { base, quote } = splitPair(pair);
+  const side = normalizeChoice(resolveSideOption(options), 'side', ['buy', 'sell']);
+  const type = normalizeChoice(options.type, 'type', ['market', 'limit']);
+  const spentCoin = side === 'sell' ? base : quote;
+  const ignore = options['ignore-treasury'] === true;
+
+  await withTreasury(path, async (state, save) => {
+    const reserved = treasuryBalance(state, exchange, spentCoin);
+    if (ignore) {
+      stdout(`WARNING: --ignore-treasury bypasses ${reserved} ${spentCoin} of treasury protection. ` +
+        `If the exchange accepts this order, the entire ${exchange}/${spentCoin} treasury ` +
+        `will be reset to 0 and recorded in ${path}, even for a partial sale/spend. ` +
+        'Dry runs and cancelled confirmations do not reset it.');
+    } else if (compareDecimals(reserved, '0') > 0) {
+      stdout(`Treasury protection: keeping ${reserved} ${spentCoin} (${exchange})`);
+      if (side === 'buy' && type === 'market') {
+        const market = await requireMarketInfo(client, pair);
+        if (options['balance-percent'] === undefined || market.marketBuyAmountAsset !== 'quote') {
+          throw new HozamoValidationError(
+            `Cannot protect a ${quote} treasury with a base-denominated market buy: ` +
+            'its actual cost is unknown. Use a limit buy or explicitly free the treasury.',
+          );
+        }
+      }
+    }
+    // Bind methods to the original client: exchange clients have private fields.
+    const protectedClient = new Proxy(client, {
+      get(target, property) {
+        if (property === 'getBalance' && !ignore) {
+          return async (coin, ...args) => {
+            const balance = await target.getBalance(coin, ...args);
+            if (coin !== spentCoin || compareDecimals(reserved, '0') === 0) return balance;
+            const available = balance?.available ?? '0';
+            const spendable = compareDecimals(available, reserved) > 0
+              ? subtractDecimals(available, reserved)
+              : '0';
+            stdout(`Spendable balance: ${available} - ${reserved} treasury = ${spendable} ${coin}`);
+            return { ...balance, available: spendable };
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const result = await submitOrder(protectedClient, options, context);
+    if (ignore && result) {
+      if (result.id === 'unknown') {
+        throw new HozamoValidationError(
+          'Order response has no ID; acceptance is uncertain. Treasury was NOT reset. ' +
+          'Check exchange order history before retrying.',
+        );
+      }
+      try {
+        recordTreasury(state, {
+          exchange, coin: spentCoin, action: 'ignore', amount: reserved,
+          at: new Date(now()).toISOString(), orderId: result.id,
+        });
+        await save();
+      } catch (error) {
+        throw new HozamoValidationError(
+          `Order ${result.id} was accepted, but treasury reset failed: ${error.message}. ` +
+          'Do NOT resubmit the order. Reconcile the treasury with treasury free after checking the exchange.',
+        );
+      }
+      stdout(`Treasury reset: ${exchange}/${spentCoin} = 0 (order ${result.id}; ledger updated)`);
+    }
+  });
 }
 
 async function printPrice(client, options, stdout) {
@@ -232,7 +391,7 @@ async function printBalances(client, options, stdout) {
 async function printStatistics(
   client,
   options,
-  { stdout, now, exchange, depositSources },
+  { stdout, now, exchange, depositSources, treasuryPath },
 ) {
   requireOption(options.coin, '--coin');
   const coin = normalizeAsset(options.coin);
@@ -255,6 +414,9 @@ async function printStatistics(
   const depositsBySource = options['deposits-by-source'] === true;
   const averagePrice = options['average-price'] === true;
   const hideWithdrawals = options['hide-withdrawals'] === true;
+  const currentTreasury = options.treasury
+    ? treasuryBalance(await readTreasury(treasuryPath), exchange, coin)
+    : undefined;
   const averagePriceDecimals = normalizeAveragePriceDecimals(
     options['average-price-decimals'],
     averagePrice,
@@ -297,13 +459,14 @@ async function printStatistics(
     `SWAPPED ${coin}`,
     ...report.receivedAssets.map((asset) => `RECEIVED ${asset} (GROSS)`),
     ...(averagePrice ? [`AVG SELL PRICE (USDT/${coin})`] : []),
+    ...(options.treasury ? [`TREASURY NOW ${coin}`] : []),
   ];
   const periodRows = options['hide-zero-days']
     ? report.rows.filter((row) => (
       statisticsRowHasActivity(row, { includeWithdrawals: !hideWithdrawals })
     ))
     : report.rows;
-  const rows = [report.sum, ...periodRows].map((row) => [
+  const rows = [report.sum, ...periodRows].map((row, index) => [
     row.date,
     row.deposited,
     ...sourceColumns.map((column) => depositSourceAmount(row, column)),
@@ -313,6 +476,7 @@ async function printStatistics(
     ...(averagePrice
       ? [formatAverageSalePrice(row, averagePriceDecimals)]
       : []),
+    ...(options.treasury ? [index === 0 ? currentTreasury : ''] : []),
   ]);
 
   if (format === 'csv') {
@@ -551,8 +715,13 @@ async function submitOrder(
 
   const order = await client.createOrder(orderRequest);
   const id = order?.id ?? order?.order_id ?? order?.uuid ?? 'unknown';
+  const orderState = String(order?.state ?? order?.status ?? '').toLowerCase();
+  if (['rejected', 'cancel', 'cancelled', 'canceled'].includes(orderState)) {
+    throw new HozamoValidationError(`Order was not accepted: id=${id}, state=${orderState}`);
+  }
   const state = order?.state ? `, state=${order.state}` : '';
   stdout(`Order submitted successfully: id=${id}${state}`);
+  return { id };
 }
 
 async function resolveBalancePercentOrder({
@@ -972,6 +1141,7 @@ Commands:
   status     Show asset and network deposit/withdrawal status
   balance    Show total, available and locked balances
   stats      Show deposit, withdrawal and swap statistics
+  treasury   Add, free or show a locally protected balance
   order      Validate and submit a market or limit order
 
 Examples:
@@ -994,6 +1164,18 @@ Run "${CLI_INVOCATION} <command> --help" for command-specific help.`;
 
 function commandHelp(command) {
   const help = {
+    treasury: `Usage:
+  ${CLI_INVOCATION} treasury add --exchange safetrade --coin PEARL --amount 2
+  ${CLI_INVOCATION} treasury free --exchange safetrade --coin PEARL --amount 1
+  ${CLI_INVOCATION} treasury free --exchange safetrade --coin PEARL --amount-percentage 100
+  ${CLI_INVOCATION} treasury show --exchange safetrade --coin PEARL
+
+Treasury is a local trading reserve, not an exchange transfer or staking product.
+Add checks available exchange funds; free/show work offline. Each add invocation
+adds once: cron controls the schedule. Free accepts exactly one amount selector.
+Balances and the UTC ledger live in treasury.json beside Hozamo (project root
+for Node). HOZAMO_TREASURY_FILE overrides this path. Back up this file and keep
+it across upgrades. All orders spending a reserved coin respect this balance.`,
     price: `Usage: ${CLI_INVOCATION} price [--exchange safetrade|coinex] --pair BTC-USDT`,
     status: `Usage: ${CLI_INVOCATION} status [--exchange safetrade|coinex] --coin PEARL,USDT
 
@@ -1015,6 +1197,7 @@ Options:
   --group-by month      One row per UTC calendar month
   --hide-zero-days      Omit output periods where every visible value is zero
   --hide-withdrawals    Do not include the withdrawal column
+  --treasury            Current local treasury in SUM only (not historical/daily)
   --deposits-by-source  Add one deposit column for each SafeTrade source address
   --average-price       Add the weighted average USDT sell price
   --average-price-decimals 5
@@ -1047,6 +1230,8 @@ Options:
                         (default: HOZAMO_BUY_RESERVE_PERCENT or 0.5)
   --price 0.28          Exact limit price
   --price-percent 10    Limit price relative to last traded price
+  --ignore-treasury     Spend protected funds; reset the spent coin's treasury
+                        and log it after order acceptance (even with --yes)
   --dryrun              Validate without submitting
   --yes                 Skip the interactive confirmation
   --order sell          Compatibility alias for --side sell`,
