@@ -462,11 +462,33 @@ node hozamo stats --exchange safetrade --coin PEARL --days 30 --treasury
 node hozamo stats --exchange safetrade --coin PEARL --days 30 --treasury --format csv
 ```
 
-`--treasury` adds `TREASURY NOW <coin>` to both table and CSV output. Only the
-`SUM` row contains the current local balance; day/week/month rows leave that
-column empty. This is a current snapshot, independent of `--from`, `--to` and
-`--days`, not a historical balance or a sum of daily holdings. Treasury-only
-changes do not make a zero-activity day appear with `--hide-zero-days`.
+`--treasury` adds one `<coin> TREASURY` column to table and CSV output
+(for example `PEARL TREASURY`):
+
+- The `SUM` row shows the **current total local reserve target**, independently
+  of `--from`, `--to` and `--days`.
+- Each day/week/month row shows the **net treasury change** during that UTC
+  day, ISO week or calendar month, restricted to the selected period:
+  `additions - releases - resets`. A `treasury add` increases it; `treasury free`
+  decreases it; a successful `--ignore-treasury` reset subtracts the amount
+  recorded in that reset's ledger entry. Negative values are valid.
+  Multiple operations are summed exactly, including partial weeks and months.
+
+The `SUM` value can differ from the sum of the displayed rows when changes
+exist outside the selected period. The period rows show net movements, not
+historical balances; if the range includes the complete ledger history, their
+sum equals the current reserve.
+
+Changes come from the local `treasury.json` ledger for the selected exchange
+and exact coin ticker, not from exchange deposits or withdrawals. Days without
+recorded changes show zero; missing or deleted history cannot be reconstructed
+from the exchange. No treasury file migration is needed.
+
+With `--hide-zero-days`, periods with a nonzero net treasury change remain visible
+when `--treasury` is enabled, including release-only and reset-only periods.
+The current reserve alone does not keep empty periods visible. If additions and
+releases cancel to zero in a period, that period is hidden unless another visible
+column has activity.
 
 ### Market order
 

@@ -173,6 +173,8 @@ export function aggregateAssetStatistics({
   endTime,
   activity,
   groupBy = 'day',
+  treasuryAdditions = [],
+  treasuryReleases = [],
 }) {
   const asset = normalizeAsset(coin);
   if (!Number.isFinite(startTime) || !Number.isFinite(endTime) || startTime >= endTime) {
@@ -221,6 +223,14 @@ export function aggregateAssetStatistics({
     );
   }
 
+  for (const addition of treasuryAdditions) {
+    addEventAmount(rowsByDate, addition, startTime, endTime, 'treasuryAdded');
+  }
+
+  for (const release of treasuryReleases) {
+    addEventAmount(rowsByDate, release, startTime, endTime, 'treasuryReleased');
+  }
+
   const dailyRows = [...rowsByDate.values()];
   const rows = groupStatisticsRows(dailyRows, groupBy);
   const receivedAssets = [...new Set(rows.flatMap((row) => (
@@ -256,6 +266,8 @@ function mergeStatisticsRow(target, source) {
   target.deposited = addDecimals(target.deposited, source.deposited);
   target.withdrawn = addDecimals(target.withdrawn, source.withdrawn);
   target.swapped = addDecimals(target.swapped, source.swapped);
+  target.treasuryAdded = addDecimals(target.treasuryAdded, source.treasuryAdded);
+  target.treasuryReleased = addDecimals(target.treasuryReleased, source.treasuryReleased);
   mergeDecimalMap(target.depositedBySource, source.depositedBySource);
   mergeDecimalMap(target.swappedByReceivedAsset, source.swappedByReceivedAsset);
   mergeDecimalMap(target.received, source.received);
@@ -407,6 +419,8 @@ function emptyRow(date) {
   return {
     date,
     deposited: '0',
+    treasuryAdded: '0',
+    treasuryReleased: '0',
     depositedBySource: new Map(),
     withdrawn: '0',
     swapped: '0',

@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { runCli } from '../src/cli.js';
-import { readTreasury, treasuryBalance, withTreasury } from '../src/treasury.js';
+import { readTreasury, recordTreasury, treasuryBalance, withTreasury } from '../src/treasury.js';
 
 const execFileAsync = promisify(execFile);
 const NOW = Date.parse('2026-11-07T12:00:00Z');
@@ -309,17 +309,18 @@ test('stats shows current treasury only in SUM, independently of date filters/gr
       '--group-by', group, '--treasury', '--format', 'csv', '--hide-withdrawals', '--average-price']);
     assert.equal(result.code, 0, result.error);
     const [header, sum, ...rows] = result.output.split('\n');
-    assert.match(header, /TREASURY NOW PEARL$/);
+    assert.match(header, /PEARL TREASURY$/);
     assert.match(sum, /^SUM,.*?,2$/);
     for (const row of rows) {
-      assert.equal(row.split(',').at(-1), '');
+      assert.equal(row.split(',').at(-1), '0');
       assert.equal(row.split(',').length, header.split(',').length);
     }
   }
   const hidden = await f.run(['stats', '--coin', 'PEARL', '--days', '3', '--treasury', '--hide-zero-days', '--format', 'csv']);
-  assert.equal(hidden.output.split('\n').length, 2);
+  assert.equal(hidden.output.split('\n').length, 3);
+  assert.match(hidden.output, /2026-11-07,0,0,0,2$/);
   const table = await f.run(['stats', '--coin', 'PEARL', '--days', '1', '--treasury']);
-  assert.match(table.output, /TREASURY NOW PEARL/);
+  assert.match(table.output, /PEARL TREASURY/);
   assert.match(table.output, /SUM\s+0\s+0\s+0\s+2/);
 });
 
@@ -418,4 +419,171 @@ test('100% free is exact for sub-satoshi reserves and ledger round-trips', async
   const state = await f.state();
   assert.equal(state.balances.safetrade.PEARL, '0');
   assert.equal(state.ledger.at(-1).amount, '0.0000000000000000000000000001');
+});
+
+async function seedTreasury(f, entries) {
+  await withTreasury(f.path, async (state, save) => {
+    for (const entry of entries) {
+      recordTreasury(state, { exchange: 'safetrade', coin: 'PEARL', action: 'add', ...entry });
+    }
+    await save();
+  });
+}
+
+function csvObjects(output) {
+  const [header, ...rows] = output.split('\n').map(line => line.split(','));
+  return rows.map(row => Object.fromEntries(header.map((key, i) => [key, row[i]])));
+}
+
+test('treasury net changes include releases and resets within UTC period boundaries across all groupings', async (t) => {
+  const f = fixture(t, {
+    getAssetActivity: async () => ({
+      deposits: [], swaps: [],
+      withdrawals: [{ timestamp: Date.parse('2026-11-04T10:00:00Z'), amount: '1' }],
+    }),
+  });
+  await seedTreasury(f, [
+    { at: '2026-10-30T23:59:59.999Z', amount: '4' }, // outside requested range
+    { at: '2026-10-31T00:00:00.000Z', amount: '0.1' },
+    { at: '2026-11-01T00:30:00+01:00', amount: '0.2' }, // still October in UTC
+    { at: '2026-11-01T00:00:00.000Z', amount: '0.4' },
+    { at: '2026-11-02T23:59:59.999Z', amount: '2' },
+    { at: '2026-11-03T10:00:00Z', action: 'free', amount: '0.2' },
+    { at: '2026-11-04T10:00:00Z', action: 'ignore', amount: '6.5', orderId: '42' },
+    { at: '2026-11-05T00:00:00.000Z', amount: '9' }, // outside; current balance is 9
+    { at: '2026-11-01T12:00:00Z', amount: '100', coin: 'BTC' },
+    { at: '2026-11-01T12:00:00Z', amount: '100', exchange: 'coinex' },
+  ]);
+  const before = readFileSync(f.path, 'utf8');
+  const base = ['stats', '--exchange', 'safetrade', '--coin', 'PEARL', '--from', '2026-10-31',
+    '--to', '2026-11-04', '--hide-zero-days', '--average-price', '--hide-withdrawals'];
+  const expected = {
+    day: [['2026-10-31', '0.3'], ['2026-11-01', '0.4'], ['2026-11-02', '2'],
+      ['2026-11-03', '-0.2'], ['2026-11-04', '-6.5']],
+    week: [['2026-W44', '0.7'], ['2026-W45', '-4.7']],
+    month: [['2026-10', '0.3'], ['2026-11', '-4.3']],
+  };
+  for (const [group, pairs] of Object.entries(expected)) {
+    const result = await f.run([...base, '--treasury', '--group-by', group, '--format', 'csv']);
+    assert.equal(result.code, 0, result.error);
+    const rows = csvObjects(result.output);
+    const label = { day: 'DATE', week: 'ISO WEEK', month: 'MONTH' }[group];
+    assert.equal(rows[0][label], 'SUM');
+    assert.equal(rows[0]['PEARL TREASURY'], '9');
+    assert.deepEqual(rows.slice(1).map(row => [row[label], row['PEARL TREASURY']]), pairs);
+    assert.equal(result.output.split('\n')[0].split(',').filter(h => h.includes('TREASURY')).length, 1);
+  }
+  const table = await f.run([...base, '--treasury']);
+  assert.equal(table.code, 0, table.error);
+  assert.match(table.output, /PEARL TREASURY/);
+  assert.match(table.output, /2026-10-31\s+0\s+0\s+[^\n]*0\.3/);
+  assert.match(table.output, /^2026-11-03\s+[^\n]*-0\.2\s*$/m);
+  assert.match(table.output, /^2026-11-04\s+[^\n]*-6\.5\s*$/m);
+  const noTreasury = await f.run([...base, '--format', 'csv']);
+  assert.equal(noTreasury.code, 0, noTreasury.error);
+  assert.doesNotMatch(noTreasury.output, /TREASURY/);
+  assert.equal(noTreasury.output.split('\n').length, 2);
+  assert.equal(readFileSync(f.path, 'utf8'), before);
+});
+
+test('treasury additions work on CoinEx and --days excludes events beyond now', async (t) => {
+  const f = fixture(t);
+  await seedTreasury(f, [
+    { exchange: 'coinex', at: '2026-11-05T23:59:59.999Z', amount: '3' },
+    { exchange: 'coinex', at: '2026-11-06T00:00:00.000Z', amount: '0.000000000000000001' },
+    { exchange: 'coinex', at: '2026-11-07T12:00:00.000Z', amount: '0.000000000000000002' },
+    { exchange: 'coinex', at: '2026-11-07T12:00:00.001Z', amount: '1' },
+  ]);
+  const result = await f.run(['stats', '--exchange', 'coinex', '--coin', 'PEARL', '--days', '2',
+    '--treasury', '--format', 'csv', '--hide-zero-days']);
+  assert.equal(result.code, 0, result.error);
+  const rows = csvObjects(result.output);
+  assert.equal(rows[0]['PEARL TREASURY'], '4.000000000000000003');
+  assert.deepEqual(rows.slice(1).map(r => [r.DATE, r['PEARL TREASURY']]), [
+    ['2026-11-06', '0.000000000000000001'], ['2026-11-07', '0.000000000000000002'],
+  ]);
+});
+
+test('stats handles missing treasury and rejects a corrupt ledger only when requested', async (t) => {
+  const f = fixture(t);
+  const args = ['stats', '--coin', 'PEARL', '--days', '2', '--format', 'csv'];
+  let result = await f.run([...args, '--treasury']);
+  assert.equal(result.code, 0, result.error);
+  let rows = csvObjects(result.output);
+  assert.equal(rows.length, 3);
+  assert.equal(rows[0]['PEARL TREASURY'], '0');
+  for (const row of rows) assert.equal(row['PEARL TREASURY'], '0');
+  result = await f.run([...args, '--treasury', '--hide-zero-days']);
+  assert.equal(csvObjects(result.output).length, 1);
+  assert.equal(existsSync(f.path), false);
+  writeFileSync(f.path, '{broken');
+  result = await f.run([...args, '--treasury']);
+  assert.equal(result.code, 1);
+  assert.match(result.error, /Invalid treasury file/);
+  assert.equal((await f.run(args)).code, 0);
+});
+
+for (const exchange of ['safetrade', 'coinex']) {
+  test(`${exchange} daily, weekly and monthly net treasury reconciles 20 added minus 6 freed to 14`, async (t) => {
+    const f = fixture(t);
+    await seedTreasury(f, [
+      { exchange, at: '2026-11-07T06:00:00Z', amount: '6' },
+      { exchange, at: '2026-11-08T06:00:00Z', action: 'free', amount: '2' },
+      { exchange, at: '2026-11-09T06:00:00Z', amount: '6' },
+      { exchange, at: '2026-11-09T07:00:00Z', action: 'free', amount: '4' },
+      { exchange, at: '2026-11-10T06:00:00Z', amount: '4' },
+      { exchange, at: '2026-11-11T06:00:00Z', amount: '2' },
+      { exchange, at: '2026-11-12T06:00:00Z', amount: '2' },
+    ]);
+    const expected = {
+      day: [['2026-11-07', '6'], ['2026-11-08', '-2'], ['2026-11-09', '2'],
+        ['2026-11-10', '4'], ['2026-11-11', '2'], ['2026-11-12', '2']],
+      week: [['2026-W45', '4'], ['2026-W46', '10']],
+      month: [['2026-11', '14']],
+    };
+    const before = readFileSync(f.path, 'utf8');
+    for (const [group, pairs] of Object.entries(expected)) {
+      const result = await f.run(['stats', '--exchange', exchange, '--coin', 'PEARL',
+        '--from', '2026-11-06', '--to', '2026-11-30', '--hide-zero-days', '--average-price',
+        '--hide-withdrawals', '--treasury', '--group-by', group, '--format', 'csv']);
+      assert.equal(result.code, 0, result.error);
+      const rows = csvObjects(result.output);
+      const label = { day: 'DATE', week: 'ISO WEEK', month: 'MONTH' }[group];
+      assert.equal(rows[0]['PEARL TREASURY'], '14');
+      assert.deepEqual(rows.slice(1).map(row => [row[label], row['PEARL TREASURY']]), pairs);
+      // The test fixture uses whole coins, so BigInt independently checks reconciliation.
+      assert.equal(rows.slice(1).reduce((total, row) => total + BigInt(row['PEARL TREASURY']), 0n), 14n);
+    }
+    assert.equal(readFileSync(f.path, 'utf8'), before);
+  });
+}
+
+test('same-day release/reset and re-add use exact decimals and zero-net periods can be hidden', async (t) => {
+  const f = fixture(t);
+  await seedTreasury(f, [
+    { at: '2026-11-01T00:00:00Z', amount: '1' },
+    { at: '2026-11-07T08:00:00Z', amount: '0.1' },
+    { at: '2026-11-07T09:00:00Z', action: 'free', amount: '0.3' },
+    { at: '2026-11-07T10:00:00Z', amount: '0.200000000000000001' },
+    { at: '2026-11-08T08:00:00Z', action: 'ignore', amount: '1.000000000000000001', orderId: '9' },
+    { at: '2026-11-08T09:00:00Z', amount: '0.1' },
+    { at: '2026-11-09T08:00:00Z', amount: '2' },
+    { at: '2026-11-09T09:00:00Z', action: 'free', amount: '2' },
+  ]);
+  const args = ['stats', '--coin', 'PEARL', '--from', '2026-11-07', '--to', '2026-11-09',
+    '--treasury', '--format', 'csv'];
+  let result = await f.run(args);
+  assert.equal(result.code, 0, result.error);
+  assert.deepEqual(csvObjects(result.output).map(row => [row.DATE, row['PEARL TREASURY']]), [
+    ['SUM', '0.1'], ['2026-11-07', '0.000000000000000001'],
+    ['2026-11-08', '-0.900000000000000001'], ['2026-11-09', '0'],
+  ]);
+  result = await f.run([...args, '--hide-zero-days']);
+  assert.equal(result.code, 0, result.error);
+  assert.deepEqual(csvObjects(result.output).map(row => row.DATE), ['SUM', '2026-11-07', '2026-11-08']);
+  result = await f.run([...args, '--hide-zero-days', '--group-by', 'week']);
+  assert.equal(result.code, 0, result.error);
+  assert.deepEqual(csvObjects(result.output).map(row => [row['ISO WEEK'], row['PEARL TREASURY']]), [
+    ['SUM', '0.1'], ['2026-W45', '-0.9'],
+  ]);
 });

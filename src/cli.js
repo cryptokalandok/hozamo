@@ -401,9 +401,15 @@ async function printStatistics(
   const depositsBySource = options['deposits-by-source'] === true;
   const averagePrice = options['average-price'] === true;
   const hideWithdrawals = options['hide-withdrawals'] === true;
-  const currentTreasury = options.treasury
-    ? treasuryBalance(await readTreasury(treasuryPath), exchange, coin)
-    : undefined;
+  const treasury = options.treasury ? await readTreasury(treasuryPath) : undefined;
+  const currentTreasury = treasury ? treasuryBalance(treasury, exchange, coin) : undefined;
+  const treasuryAdditions = treasury?.ledger
+    .filter((entry) => entry.exchange === exchange && entry.coin === coin && entry.action === 'add')
+    .map((entry) => ({ timestamp: Date.parse(entry.at), amount: entry.amount })) ?? [];
+  const treasuryReleases = treasury?.ledger
+    .filter((entry) => entry.exchange === exchange && entry.coin === coin &&
+      ['free', 'ignore'].includes(entry.action))
+    .map((entry) => ({ timestamp: Date.parse(entry.at), amount: entry.amount })) ?? [];
   const averagePriceDecimals = normalizeAveragePriceDecimals(
     options['average-price-decimals'],
     averagePrice,
@@ -434,6 +440,8 @@ async function printStatistics(
     endTime: period.endTime,
     activity,
     groupBy,
+    treasuryAdditions,
+    treasuryReleases,
   });
   const sourceColumns = depositsBySource
     ? buildDepositSourceColumns(report.rows, sourceBook)
@@ -446,7 +454,7 @@ async function printStatistics(
     `SWAPPED ${coin}`,
     ...report.receivedAssets.map((asset) => `RECEIVED ${asset} (GROSS)`),
     ...(averagePrice ? [`AVG SELL PRICE (USDT/${coin})`] : []),
-    ...(options.treasury ? [`TREASURY NOW ${coin}`] : []),
+    ...(options.treasury ? [`${coin} TREASURY`] : []),
   ];
   const periodRows = options['hide-zero-days']
     ? report.rows.filter((row) => (
@@ -463,7 +471,9 @@ async function printStatistics(
     ...(averagePrice
       ? [formatAverageSalePrice(row, averagePriceDecimals)]
       : []),
-    ...(options.treasury ? [index === 0 ? currentTreasury : ''] : []),
+    ...(options.treasury ? [index === 0
+      ? currentTreasury
+      : subtractDecimals(row.treasuryAdded, row.treasuryReleased)] : []),
   ]);
 
   if (format === 'csv') {
@@ -488,7 +498,8 @@ function statisticsRowHasActivity(row, { includeWithdrawals = true } = {}) {
     ...(includeWithdrawals ? [row.withdrawn] : []),
     row.swapped,
     ...row.received.values(),
-  ].some((value) => compareDecimals(value, '0') !== 0);
+  ].some((value) => compareDecimals(value, '0') !== 0) ||
+    compareDecimals(row.treasuryAdded, row.treasuryReleased) !== 0;
 }
 
 function statisticsPeriodHeader(groupBy) {
@@ -1185,7 +1196,7 @@ Options:
   --group-by month      One row per UTC calendar month
   --hide-zero-days      Omit output periods where every visible value is zero
   --hide-withdrawals    Do not include the withdrawal column
-  --treasury            Current local treasury in SUM only (not historical/daily)
+  --treasury            One treasury column: net change per period, current balance in SUM
   --deposits-by-source  Add one deposit column for each SafeTrade source address
   --average-price       Add the weighted average USDT sell price
   --average-price-decimals 5
