@@ -378,60 +378,87 @@ Releasing more than is reserved is rejected. `add`, `free` and `show` work witho
 credentials or network access. Releasing funds only makes them eligible for a
 subsequent order; it does not itself sell or withdraw anything.
 
-#### Estimate the cost of the remaining treasury
+#### Estimate treasury cost and release revenue by day
 
 ```bash
 node hozamo treasury cost --exchange safetrade --coin PEARL
 node hozamo treasury cost --exchange coinex --coin PEARL --format csv --decimals 8
 ```
 
-`cost` estimates how much **gross USDT revenue you forwent** by reserving the
-coins that are still in the treasury. It is not a purchase cost, tax cost basis,
-current market valuation or realized loss. It reads the existing local ledger
-and authenticated history for the selected exchange/account; it never places
-orders, modifies the treasury or calls a blockchain explorer. No migration is
-needed. Use the same account's API credentials as for `stats`.
+`cost` prices **daily net treasury changes**, using the same UTC day boundaries
+and net quantities as `stats --treasury`. For each date, first calculate
+`add - free - ignore`, then:
 
-The calculation is:
+- Positive net change: quantity × that day's average = estimated addition cost
+  (the gross USDT revenue forgone by reserving the coins).
+- Negative net change: absolute quantity × that day's average = estimated release
+  revenue. This reduces the running net cost.
+- Zero net change: omit the date; no price is needed. Same-day additions and
+  releases cancel before valuation, regardless of their order within the day.
 
-1. Replay additions, releases and resets in ledger order. Releases consume the
-   oldest remaining additions first (**FIFO**); a successful `--ignore-treasury`
-   reset consumes everything held at that point. Later additions start new lots.
-2. Group the remaining quantities by the **UTC date of their original addition**.
-3. For each date, take your own executed swaps into USDT: `gross USDT received /
-   coin spent into USDT`. This is volume-weighted, just like `stats --average-price`.
-   Trades into BTC or other assets do not enter the USDT calculation. Purchases
-   of the selected coin and unfilled orders do not count either.
-4. Multiply each remaining quantity by that day's average, then sum the estimates.
-   The SUM price is weighted by the remaining treasury quantities, not by all trades.
+The price is your own volume-weighted executed USDT swap price on that UTC date:
+`gross USDT received / coin spent into USDT`, as in `stats --average-price`.
+Purchases of the selected coin, swaps into other assets and unfilled orders do
+not enter that average. No historical lots are matched: a negative day is valued
+at its own day's price, without changing earlier days' quantities or prices.
 
-For example, adding 10 coins on a day with a 2 USDT average and another 10 on a
-day with a 3 USDT average, then freeing 4 coins, leaves 6 from the first date and
-10 from the second: `6 × 2 + 10 × 3 = 42 USDT` for the remaining 16 coins.
+Table and CSV output begin with three summary rows, followed by nonzero daily
+changes in date order. Columns show quantity change, average price, estimated
+addition cost, estimated release revenue and estimated net cost (all USDT values
+are gross, before fees):
 
-Table and CSV output contain a SUM row followed by the remaining addition dates,
-with quantity, average sale price and estimated forgone USDT revenue. Monetary
-values are rounded to at most **5 decimal places** by default; `--decimals 0..100`
-changes display precision. Quantities stay exact. Intermediate divisions use 100
-decimal places; display rounding happens after the calculation, so displayed
-rounded rows can differ slightly from their displayed total.
+| Row | Quantity | Average price | Estimated values |
+| --- | --- | --- | --- |
+| `SUM` | Current treasury target: positive days minus negative days | Net cost / current target; N/A when the target is zero | Total cost, total revenue, and their difference |
+| `ADDED` | Sum of positive daily changes | Total addition cost / added quantity | Total estimated addition cost |
+| `RELEASED` | Sum of negative daily changes (negative quantity) | Total release revenue / absolute released quantity | Total estimated revenue; net cost is its negative |
 
-If no USDT sales are returned for a date, its price and estimate are **N/A**.
-The SUM estimate is also N/A until all remaining quantities can be priced. Table
-output additionally reports the priced/unpriced quantities and the known subtotal;
-CSV retains N/A cells rather than implying a zero price. No previous-day, ticker
-or public market-price fallback is used. An exchange request failure fails the
-command instead of presenting a partial result as complete. Estimates rely on
-the trade history the exchange makes available and exclude fees and slippage.
+`ADDED` and `RELEASED` are breakdowns of `SUM`, not extra transactions. Their
+quantities summarize **net days**, not every individual add/free invocation.
+For example, a day with 6 added and 4 freed contributes 2 to `ADDED` and nothing
+to `RELEASED`, exactly as it contributes +2 to `stats --treasury`.
 
-The command values the **entire current reserve target**; it has no date filter.
-It takes one ledger snapshot and fetches history from the earliest to the latest
-still-held addition date (up to the current time for today's additions). Today's
-price can change as more trades execute. Like `add`, the ledger records reserve
-targets, not proof of actual funding: if you reserved coins before receiving them,
-the calculation still uses the addition date. A missing/empty treasury reports
-zero without an API request; a corrupt ledger fails. The existing history-range
-limit of 10,000 days applies. `add`, `free` and `show` remain offline.
+Example: +10 coins at 2 USDT, +10 on another day at 3 USDT, then -4 on a third day
+at 4 USDT gives:
+
+- `ADDED`: 20 coins, estimated cost 50 USDT, weighted average 2.5 USDT/coin.
+- `RELEASED`: -4 coins, estimated revenue 16 USDT, weighted average 4 USDT/coin.
+- `SUM`: 16 coins, net cost `50 - 16 = 34 USDT`, net average `34 / 16 = 2.125`.
+
+Net cost and its average can be negative if estimated release revenue exceeds
+estimated addition cost. At zero balance, historical costs/revenue remain visible
+and the SUM average is N/A; zero balance does not erase history.
+
+This is an **estimate**, not purchase cost, tax cost basis, current market value
+or verified realized profit. `free` only releases protection and does not sell.
+An `ignore` entry records a reset after order acceptance, not proof of execution
+of the entire target. The report assumes a negative day's net release was sold
+at your average USDT price for that day; it does not match releases to specific
+trades. Targets can also be unfunded. The ledger date is used even if actual
+funding or execution happened later. Fees and slippage are excluded.
+
+Monetary values are rounded to at most **5 decimal places** by default;
+`--decimals 0..100` changes display precision. Quantities stay exact. Intermediate
+divisions use 100 decimal places; display rounding happens after summing. The
+rounded daily values may therefore differ slightly from their displayed total.
+
+If a nonzero day has no USDT sales, its price and affected value are **N/A**, not
+zero. Only the affected addition/release total is unavailable, but net cost and
+its average are also N/A. Table output additionally shows priced/unpriced
+quantities and known subtotals for each direction. No previous-day or ticker-price
+fallback is used. An API failure fails the command instead of showing an apparently
+complete report. Values depend on the history the exchange makes available.
+
+The command reads one validated snapshot of the **entire local ledger** for the
+selected exchange/coin, without date filtering. It requests authenticated history
+from the earliest to the latest nonzero net day (up to the current time for today).
+Today's result can change as more trades or treasury movements occur. The existing
+10,000-day range limit applies. A missing ledger or only zero-net days needs no
+API request. A corrupt ledger or future-dated entry fails the command.
+
+Use the same account credentials as `stats`. No orders are submitted, no ledger
+is modified, and no blockchain explorer is used. Existing `treasury.json` files
+need no migration. `add`, `free`, `show` and `stats` retain their existing behavior.
 
 #### Storage, scheduling and upgrades
 
@@ -741,7 +768,7 @@ functions or fake clients and verify:
 - treasury accumulation/release, ledger consistency, order protection and override;
 - treasury locking across commands/processes and unchanged state after failures;
 - current treasury snapshots and net changes in table/CSV statistics;
-- FIFO treasury cost estimates, weighted USDT prices, missing prices and display rounding;
+- daily net treasury valuation, separate addition/release averages, missing prices and signed rounding;
 - unchanged treasury files during cost queries, including API errors and empty reserves.
 
 For a fast syntax-only check, run:

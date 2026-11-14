@@ -3,70 +3,95 @@ import { HozamoValidationError } from './errors.js';
 import { aggregateAssetStatistics } from './statistics.js';
 import { treasuryBalance } from './treasury.js';
 
-// Replay a validated ledger in append order, not timestamp order (clocks can move).
-// A release consumes the oldest still-held addition; a reset consumes all of them.
-export function remainingTreasuryLots(state, exchange, coin) {
-  const lots = [];
-  let head = 0;
+// Net every UTC day before pricing it, just like stats --treasury. No lot matching.
+export function treasuryDailyChanges(state, exchange, coin, asOf) {
+  const days = new Map();
+  let added = '0', released = '0';
   for (const entry of state.ledger) {
     if (entry.exchange !== exchange || entry.coin !== coin) continue;
-    if (entry.action === 'add') {
-      if (compareDecimals(entry.amount, '0') > 0) {
-        const timestamp = Date.parse(entry.at);
-        lots.push({ timestamp, date: new Date(timestamp).toISOString().slice(0, 10), amount: entry.amount });
-      }
-    } else {
-      let remaining = entry.amount;
-      while (compareDecimals(remaining, '0') > 0) {
-        const lot = lots[head];
-        if (!lot) throw new HozamoValidationError('Treasury releases exceed additions');
-        const consumed = compareDecimals(lot.amount, remaining) > 0 ? remaining : lot.amount;
-        lot.amount = subtractDecimals(lot.amount, consumed);
-        remaining = subtractDecimals(remaining, consumed);
-        if (compareDecimals(lot.amount, '0') === 0) head += 1;
-      }
+    const timestamp = Date.parse(entry.at);
+    if (timestamp > asOf) {
+      throw new HozamoValidationError('Treasury has a future-dated entry; check the ledger timestamps and system clock');
     }
+    const date = new Date(timestamp).toISOString().slice(0, 10);
+    const day = days.get(date) ?? { added: '0', released: '0' };
+    if (entry.action === 'add') {
+      day.added = addDecimals(day.added, entry.amount);
+      added = addDecimals(added, entry.amount);
+    } else {
+      day.released = addDecimals(day.released, entry.amount);
+      released = addDecimals(released, entry.amount);
+    }
+    days.set(date, day);
   }
-  const remaining = lots.slice(head);
-  const total = remaining.reduce((sum, lot) => addDecimals(sum, lot.amount), '0');
-  if (compareDecimals(total, treasuryBalance(state, exchange, coin)) !== 0) {
-    throw new HozamoValidationError('Remaining treasury lots do not match the current balance');
+  if (compareDecimals(subtractDecimals(added, released), treasuryBalance(state, exchange, coin)) !== 0) {
+    throw new HozamoValidationError('Daily treasury changes do not match the current balance');
   }
-  return remaining;
+  return [...days].sort(([a], [b]) => a.localeCompare(b))
+    .filter(([, day]) => compareDecimals(day.added, day.released) !== 0)
+    .map(([date, day]) => {
+      const amount = subtractDecimals(day.added, day.released);
+      return { date, amount, direction: amount.startsWith('-') ? 'released' : 'added' };
+    });
 }
 
-export function estimateTreasuryCost({ coin, lots, activity, startTime, endTime }) {
-  // Reuse the stats trade weighting and local time filters. Transfers are irrelevant.
+function signedDivide(value, amount) {
+  const negative = value.startsWith('-');
+  const result = divideDecimals(negative ? value.slice(1) : value, amount, 100);
+  return negative && result !== '0' ? `-${result}` : result;
+}
+
+export function estimateTreasuryCost({ coin, changes, activity, startTime, endTime }) {
+  // Reuse stats' executed-trade weighting and local time filters; ignore transfers.
   const statistics = aggregateAssetStatistics({
     coin, startTime, endTime, activity: { swaps: activity.swaps ?? [] },
   });
   const salesByDate = new Map(statistics.rows.map((row) => [row.date, row]));
-  const amounts = new Map();
-  for (const lot of lots) {
-    amounts.set(lot.date, addDecimals(amounts.get(lot.date) ?? '0', lot.amount));
-  }
-  let pricedAmount = '0', unpricedAmount = '0', knownValue = '0';
-  const rows = [...amounts].sort(([a], [b]) => a.localeCompare(b)).map(([date, amount]) => {
+  const totals = {
+    added: { amount: '0', knownValue: '0', unpricedAmount: '0' },
+    released: { amount: '0', knownValue: '0', unpricedAmount: '0' },
+  };
+  const rows = changes.map(({ date, amount, direction }) => {
+    const magnitude = amount.startsWith('-') ? amount.slice(1) : amount;
+    const total = totals[direction];
+    total.amount = addDecimals(total.amount, magnitude);
     const sales = salesByDate.get(date);
     const spent = sales?.swappedByReceivedAsset.get('USDT') ?? '0';
+    let price = null, value = null;
     if (compareDecimals(spent, '0') === 0) {
-      unpricedAmount = addDecimals(unpricedAmount, amount);
-      return { date, amount, price: null, value: null };
+      total.unpricedAmount = addDecimals(total.unpricedAmount, magnitude);
+    } else {
+      const gross = sales.received.get('USDT') ?? '0';
+      price = divideDecimals(gross, spent, 100);
+      // Multiply before dividing, so the displayed daily price is never used as input.
+      value = divideDecimals(multiplyDecimals(magnitude, gross), spent, 100);
+      total.knownValue = addDecimals(total.knownValue, value);
     }
-    const gross = sales.received.get('USDT') ?? '0';
-    const price = divideDecimals(gross, spent, 100);
-    // Multiply before dividing: never multiply by an already rounded daily price.
-    const value = divideDecimals(multiplyDecimals(amount, gross), spent, 100);
-    pricedAmount = addDecimals(pricedAmount, amount);
-    knownValue = addDecimals(knownValue, value);
-    return { date, amount, price, value };
+    const cost = direction === 'added' ? value : '0';
+    const revenue = direction === 'released' ? value : '0';
+    return { date, amount, price, cost, revenue,
+      netCost: value === null ? null : subtractDecimals(cost, revenue) };
   });
-  const amount = addDecimals(pricedAmount, unpricedAmount);
-  const complete = compareDecimals(unpricedAmount, '0') === 0;
+  for (const total of Object.values(totals)) {
+    total.pricedAmount = subtractDecimals(total.amount, total.unpricedAmount);
+    total.value = total.unpricedAmount === '0' ? total.knownValue : null;
+    total.price = total.value !== null && total.amount !== '0'
+      ? divideDecimals(total.value, total.amount, 100) : null;
+  }
+  const { added, released } = totals;
+  const amount = subtractDecimals(added.amount, released.amount);
+  const netCost = added.value === null || released.value === null
+    ? null : subtractDecimals(added.value, released.value);
   const sum = {
-    date: 'SUM', amount,
-    price: complete && compareDecimals(amount, '0') > 0 ? divideDecimals(knownValue, amount, 100) : null,
-    value: complete ? knownValue : null,
+    date: 'SUM', amount, cost: added.value, revenue: released.value, netCost,
+    price: netCost !== null && amount !== '0' ? signedDivide(netCost, amount) : null,
   };
-  return { rows, sum, pricedAmount, unpricedAmount, knownValue };
+  const summaries = [sum,
+    { date: 'ADDED', amount: added.amount, price: added.price,
+      cost: added.value, revenue: '0', netCost: added.value },
+    { date: 'RELEASED', amount: subtractDecimals('0', released.amount), price: released.price,
+      cost: '0', revenue: released.value,
+      netCost: released.value === null ? null : subtractDecimals('0', released.value) },
+  ];
+  return { rows, summaries, sum, added, released };
 }

@@ -33,7 +33,7 @@ import {
 } from './normalizers.js';
 import { configureDnsResultOrder } from './network.js';
 import { readTreasury, recordTreasury, treasuryBalance, withTreasury } from './treasury.js';
-import { remainingTreasuryLots, estimateTreasuryCost } from './treasury-cost.js';
+import { treasuryDailyChanges, estimateTreasuryCost } from './treasury-cost.js';
 import {
   aggregateAssetStatistics,
   resolveStatisticsPeriod,
@@ -263,16 +263,13 @@ async function printTreasuryCost(options, { path, exchange, coin, now, stdout, c
   }
   const decimals = Number(precision);
   const state = await readTreasury(path);
-  const lots = remainingTreasuryLots(state, exchange, coin);
   const asOf = Number(typeof now === 'function' ? now() : now);
   if (!Number.isFinite(asOf)) throw new HozamoValidationError('Current time is invalid');
+  const changes = treasuryDailyChanges(state, exchange, coin, asOf);
   let activity = { swaps: [] };
   let startTime = asOf, endTime = asOf + 1;
-  if (lots.length) {
-    if (lots.some((lot) => lot.timestamp > asOf)) {
-      throw new HozamoValidationError('Treasury has a future-dated addition; check the ledger timestamps and system clock');
-    }
-    const dates = lots.map((lot) => lot.date).sort();
+  if (changes.length) {
+    const dates = changes.map((day) => day.date);
     const period = resolveStatisticsPeriod({ from: dates[0], to: dates.at(-1) });
     startTime = period.startTime;
     endTime = Math.min(period.endTime, asOf + 1);
@@ -282,16 +279,21 @@ async function printTreasuryCost(options, { path, exchange, coin, now, stdout, c
     }
     activity = await client.getAssetActivity({ coin, startTime, endTime });
   }
-  const report = estimateTreasuryCost({ coin, lots, activity, startTime, endTime });
+  const report = estimateTreasuryCost({ coin, changes, activity, startTime, endTime });
   // Round only for display, after weighting and summing at full calculation precision.
-  const money = (value) => value === null ? 'N/A' : divideDecimals(
-    addDecimals(value, `0.${'0'.repeat(decimals)}5`), '1', decimals,
-  );
+  const money = (value) => {
+    if (value === null) return 'N/A';
+    const negative = value.startsWith('-');
+    const magnitude = negative ? value.slice(1) : value;
+    const rounded = divideDecimals(addDecimals(magnitude, `0.${'0'.repeat(decimals)}5`), '1', decimals);
+    return negative && rounded !== '0' ? `-${rounded}` : rounded;
+  };
   const headers = [
-    'DATE', `${coin} TREASURY`, `AVG SELL PRICE (USDT/${coin})`, 'EST. FOREGONE USDT (GROSS)',
+    'DATE', `${coin} CHANGE`, `AVG PRICE (USDT/${coin})`,
+    'EST. COST USDT (GROSS)', 'EST. REVENUE USDT (GROSS)', 'EST. NET COST USDT (GROSS)',
   ];
-  const rows = [report.sum, ...report.rows].map((row) => [
-    row.date, row.amount, money(row.price), money(row.value),
+  const rows = [...report.summaries, ...report.rows].map((row) => [
+    row.date, row.amount, money(row.price), money(row.cost), money(row.revenue), money(row.netCost),
   ]);
   if (format === 'csv') {
     printCsv(headers, rows, stdout);
@@ -301,15 +303,19 @@ async function printTreasuryCost(options, { path, exchange, coin, now, stdout, c
   stdout(`Asset: ${coin}`);
   stdout(`Treasury file: ${path}`);
   stdout(`As of: ${new Date(asOf).toISOString()}`);
-  stdout('Basis: remaining reserve targets (FIFO), own same-day UTC USDT trades; gross, before fees.');
+  stdout('Basis: daily net treasury changes (UTC), own same-day USDT trade averages; gross, before fees.');
   printTable(headers, rows, stdout);
-  stdout(`Priced: ${report.pricedAmount} ${coin}; unpriced: ${report.unpricedAmount} ${coin}; ` +
-    `known subtotal: ${money(report.knownValue)} USDT (gross).`);
-  if (compareDecimals(report.unpricedAmount, '0') > 0) {
-    stdout('N/A: no USDT sale price for one or more addition days; the full estimate is unavailable.');
+  stdout('ADDED / RELEASED summarize positive / negative net days. SUM shows the current target, ' +
+    'net cost (cost - revenue), and net cost per remaining coin.');
+  for (const [label, total] of [['Added', report.added], ['Released', report.released]]) {
+    stdout(`${label}: priced ${total.pricedAmount} ${coin}; unpriced ${total.unpricedAmount} ${coin}; ` +
+      `known subtotal: ${money(total.knownValue)} USDT (gross).`);
   }
-  stdout('This is estimated forgone revenue, not purchase cost or current market value. ' +
-    'Reserve targets may be unfunded; today\'s average can change as more trades execute.');
+  if (report.sum.netCost === null) {
+    stdout('N/A: no USDT sale price for one or more nonzero days; affected totals are unavailable.');
+  }
+  stdout('Release revenue is estimated: free/ignore do not prove a sale. This is not realized profit. ' +
+    'Targets may be unfunded; today\'s average can change.');
 }
 
 async function submitTreasuryOrder(client, options, context) {
@@ -1242,14 +1248,17 @@ Balances and the UTC ledger live in treasury.json beside Hozamo (project root
 for Node). HOZAMO_TREASURY_FILE overrides this path. Back up this file and keep
 it across upgrades. All orders spending a reserved coin respect this balance.
 
-Cost estimates gross forgone USDT revenue for the remaining reserve targets.
-Free/ignore consume the oldest additions first (FIFO, ledger order). Each remaining
-addition uses your own volume-weighted USDT sale price on its UTC date. Missing
-prices are N/A, never zero. The SUM price is weighted by the remaining reserve.
-Cost reads authenticated exchange history; it does not trade or change the ledger.
---format table|csv    Default: table; SUM first, then remaining addition dates
+Cost prices each UTC day's net change (add - free - ignore) using your own
+volume-weighted USDT trade price that day. Positive days add estimated cost;
+negative days add estimated release revenue; zero-net days are omitted.
+SUM: current target, net cost (cost - revenue), net cost / current target.
+ADDED / RELEASED: separate quantities, estimated values and weighted prices.
+Missing prices are N/A, never zero; a zero balance has no average price.
+Cost reads authenticated exchange history without trading or changing the ledger.
+Free/ignore do not prove a sale: revenue is estimated, not realized profit.
+--format table|csv    Default: table; SUM, ADDED, RELEASED, then daily changes
 --decimals 0..100     Price/value display precision, default 5 (rounded)
-No date filter: cost values the entire current target, which may be unfunded.`,
+No date filter: all daily changes in the ledger are included, even at zero balance.`,
     price: `Usage: ${CLI_INVOCATION} price [--exchange safetrade|coinex] --pair BTC-USDT`,
     status: `Usage: ${CLI_INVOCATION} status [--exchange safetrade|coinex] --coin PEARL,USDT
 
