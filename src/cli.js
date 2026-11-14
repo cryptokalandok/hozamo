@@ -33,6 +33,7 @@ import {
 } from './normalizers.js';
 import { configureDnsResultOrder } from './network.js';
 import { readTreasury, recordTreasury, treasuryBalance, withTreasury } from './treasury.js';
+import { remainingTreasuryLots, estimateTreasuryCost } from './treasury-cost.js';
 import {
   aggregateAssetStatistics,
   resolveStatisticsPeriod,
@@ -119,15 +120,10 @@ export async function runCli(argv, dependencies = {}) {
       now: dependencies.now ?? Date.now,
       stdout,
     };
-    // Treasury targets are local bookkeeping, independent of available exchange funds.
-    if (command === 'treasury') {
-      await manageTreasury(treasuryAction, options, treasuryContext);
-      return 0;
-    }
     const clientFactory = dependencies.clientFactory ?? ((clientOptions) => (
       createExchangeClient(clientOptions)
     ));
-    const client = clientFactory({
+    const createClient = () => clientFactory({
       exchange,
       env: config,
       timeoutMs: parseTimeout(
@@ -137,6 +133,12 @@ export async function runCli(argv, dependencies = {}) {
           : config.SAFETRADE_TIMEOUT_MS),
       ),
     });
+    // Only cost needs account history; add/free/show remain entirely offline.
+    if (command === 'treasury') {
+      await manageTreasury(treasuryAction, options, { ...treasuryContext, createClient });
+      return 0;
+    }
+    const client = createClient();
 
     switch (command) {
       case 'price':
@@ -198,17 +200,22 @@ export async function runCli(argv, dependencies = {}) {
   }
 }
 
-async function manageTreasury(action, options, { path, exchange, now, stdout }) {
-  if (!['add', 'free', 'show'].includes(action)) {
-    throw new HozamoValidationError('Use treasury add, treasury free or treasury show; see treasury --help');
+async function manageTreasury(action, options, { path, exchange, now, stdout, createClient }) {
+  if (!['add', 'free', 'show', 'cost'].includes(action)) {
+    throw new HozamoValidationError('Use treasury add, treasury free, treasury show or treasury cost; see treasury --help');
   }
   assertKnownOptions(options, [
     'exchange', 'coin', 'debug',
-    ...(action === 'show' ? [] : ['amount']),
+    ...(['add', 'free'].includes(action) ? ['amount'] : []),
     ...(action === 'free' ? ['amount-percentage'] : []),
+    ...(action === 'cost' ? ['format', 'decimals'] : []),
   ]);
   requireOption(options.coin, '--coin');
   const coin = normalizeAsset(options.coin);
+  if (action === 'cost') {
+    await printTreasuryCost(options, { path, exchange, coin, now, stdout, createClient });
+    return;
+  }
   if (action === 'show') {
     const state = await readTreasury(path);
     stdout(`Treasury file: ${path}`);
@@ -246,6 +253,63 @@ async function manageTreasury(action, options, { path, exchange, now, stdout }) 
     stdout(`Treasury ${action}: ${amount} ${coin} (${exchange}); balance ${current} -> ${after}`);
     stdout(`Treasury file: ${path}`);
   });
+}
+
+async function printTreasuryCost(options, { path, exchange, coin, now, stdout, createClient }) {
+  const format = normalizeChoice(options.format ?? 'table', 'format', ['table', 'csv']);
+  const precision = String(options.decimals ?? DEFAULT_AVERAGE_PRICE_DECIMALS).trim();
+  if (!/^(?:0|[1-9]\d*)$/.test(precision) || Number(precision) > 100) {
+    throw new HozamoValidationError('--decimals must be an integer between 0 and 100');
+  }
+  const decimals = Number(precision);
+  const state = await readTreasury(path);
+  const lots = remainingTreasuryLots(state, exchange, coin);
+  const asOf = Number(typeof now === 'function' ? now() : now);
+  if (!Number.isFinite(asOf)) throw new HozamoValidationError('Current time is invalid');
+  let activity = { swaps: [] };
+  let startTime = asOf, endTime = asOf + 1;
+  if (lots.length) {
+    if (lots.some((lot) => lot.timestamp > asOf)) {
+      throw new HozamoValidationError('Treasury has a future-dated addition; check the ledger timestamps and system clock');
+    }
+    const dates = lots.map((lot) => lot.date).sort();
+    const period = resolveStatisticsPeriod({ from: dates[0], to: dates.at(-1) });
+    startTime = period.startTime;
+    endTime = Math.min(period.endTime, asOf + 1);
+    const client = createClient();
+    if (typeof client.getAssetActivity !== 'function') {
+      throw new HozamoValidationError('The selected exchange does not provide asset history statistics');
+    }
+    activity = await client.getAssetActivity({ coin, startTime, endTime });
+  }
+  const report = estimateTreasuryCost({ coin, lots, activity, startTime, endTime });
+  // Round only for display, after weighting and summing at full calculation precision.
+  const money = (value) => value === null ? 'N/A' : divideDecimals(
+    addDecimals(value, `0.${'0'.repeat(decimals)}5`), '1', decimals,
+  );
+  const headers = [
+    'DATE', `${coin} TREASURY`, `AVG SELL PRICE (USDT/${coin})`, 'EST. FOREGONE USDT (GROSS)',
+  ];
+  const rows = [report.sum, ...report.rows].map((row) => [
+    row.date, row.amount, money(row.price), money(row.value),
+  ]);
+  if (format === 'csv') {
+    printCsv(headers, rows, stdout);
+    return;
+  }
+  stdout(`Exchange: ${exchange}`);
+  stdout(`Asset: ${coin}`);
+  stdout(`Treasury file: ${path}`);
+  stdout(`As of: ${new Date(asOf).toISOString()}`);
+  stdout('Basis: remaining reserve targets (FIFO), own same-day UTC USDT trades; gross, before fees.');
+  printTable(headers, rows, stdout);
+  stdout(`Priced: ${report.pricedAmount} ${coin}; unpriced: ${report.unpricedAmount} ${coin}; ` +
+    `known subtotal: ${money(report.knownValue)} USDT (gross).`);
+  if (compareDecimals(report.unpricedAmount, '0') > 0) {
+    stdout('N/A: no USDT sale price for one or more addition days; the full estimate is unavailable.');
+  }
+  stdout('This is estimated forgone revenue, not purchase cost or current market value. ' +
+    'Reserve targets may be unfunded; today\'s average can change as more trades execute.');
 }
 
 async function submitTreasuryOrder(client, options, context) {
@@ -1139,7 +1203,7 @@ Commands:
   status     Show asset and network deposit/withdrawal status
   balance    Show total, available and locked balances
   stats      Show deposit, withdrawal and swap statistics
-  treasury   Add, free or show a locally protected balance
+  treasury   Add, free, show or estimate the cost of a local reserve
   order      Validate and submit a market or limit order
 
 Examples:
@@ -1167,6 +1231,8 @@ function commandHelp(command) {
   ${CLI_INVOCATION} treasury free --exchange safetrade --coin PEARL --amount 1
   ${CLI_INVOCATION} treasury free --exchange safetrade --coin PEARL --amount-percentage 100
   ${CLI_INVOCATION} treasury show --exchange safetrade --coin PEARL
+  ${CLI_INVOCATION} treasury cost --exchange safetrade --coin PEARL
+  ${CLI_INVOCATION} treasury cost --exchange coinex --coin PEARL --format csv --decimals 8
 
 Treasury is a local trading reserve, not an exchange transfer or staking product.
 Add/free/show work offline. The reserve target may exceed available exchange funds.
@@ -1174,7 +1240,16 @@ Orders can spend only the available balance above this target. Each add invocati
 adds once: cron controls the schedule. Free accepts exactly one amount selector.
 Balances and the UTC ledger live in treasury.json beside Hozamo (project root
 for Node). HOZAMO_TREASURY_FILE overrides this path. Back up this file and keep
-it across upgrades. All orders spending a reserved coin respect this balance.`,
+it across upgrades. All orders spending a reserved coin respect this balance.
+
+Cost estimates gross forgone USDT revenue for the remaining reserve targets.
+Free/ignore consume the oldest additions first (FIFO, ledger order). Each remaining
+addition uses your own volume-weighted USDT sale price on its UTC date. Missing
+prices are N/A, never zero. The SUM price is weighted by the remaining reserve.
+Cost reads authenticated exchange history; it does not trade or change the ledger.
+--format table|csv    Default: table; SUM first, then remaining addition dates
+--decimals 0..100     Price/value display precision, default 5 (rounded)
+No date filter: cost values the entire current target, which may be unfunded.`,
     price: `Usage: ${CLI_INVOCATION} price [--exchange safetrade|coinex] --pair BTC-USDT`,
     status: `Usage: ${CLI_INVOCATION} status [--exchange safetrade|coinex] --coin PEARL,USDT
 

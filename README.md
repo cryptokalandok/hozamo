@@ -378,6 +378,61 @@ Releasing more than is reserved is rejected. `add`, `free` and `show` work witho
 credentials or network access. Releasing funds only makes them eligible for a
 subsequent order; it does not itself sell or withdraw anything.
 
+#### Estimate the cost of the remaining treasury
+
+```bash
+node hozamo treasury cost --exchange safetrade --coin PEARL
+node hozamo treasury cost --exchange coinex --coin PEARL --format csv --decimals 8
+```
+
+`cost` estimates how much **gross USDT revenue you forwent** by reserving the
+coins that are still in the treasury. It is not a purchase cost, tax cost basis,
+current market valuation or realized loss. It reads the existing local ledger
+and authenticated history for the selected exchange/account; it never places
+orders, modifies the treasury or calls a blockchain explorer. No migration is
+needed. Use the same account's API credentials as for `stats`.
+
+The calculation is:
+
+1. Replay additions, releases and resets in ledger order. Releases consume the
+   oldest remaining additions first (**FIFO**); a successful `--ignore-treasury`
+   reset consumes everything held at that point. Later additions start new lots.
+2. Group the remaining quantities by the **UTC date of their original addition**.
+3. For each date, take your own executed swaps into USDT: `gross USDT received /
+   coin spent into USDT`. This is volume-weighted, just like `stats --average-price`.
+   Trades into BTC or other assets do not enter the USDT calculation. Purchases
+   of the selected coin and unfilled orders do not count either.
+4. Multiply each remaining quantity by that day's average, then sum the estimates.
+   The SUM price is weighted by the remaining treasury quantities, not by all trades.
+
+For example, adding 10 coins on a day with a 2 USDT average and another 10 on a
+day with a 3 USDT average, then freeing 4 coins, leaves 6 from the first date and
+10 from the second: `6 × 2 + 10 × 3 = 42 USDT` for the remaining 16 coins.
+
+Table and CSV output contain a SUM row followed by the remaining addition dates,
+with quantity, average sale price and estimated forgone USDT revenue. Monetary
+values are rounded to at most **5 decimal places** by default; `--decimals 0..100`
+changes display precision. Quantities stay exact. Intermediate divisions use 100
+decimal places; display rounding happens after the calculation, so displayed
+rounded rows can differ slightly from their displayed total.
+
+If no USDT sales are returned for a date, its price and estimate are **N/A**.
+The SUM estimate is also N/A until all remaining quantities can be priced. Table
+output additionally reports the priced/unpriced quantities and the known subtotal;
+CSV retains N/A cells rather than implying a zero price. No previous-day, ticker
+or public market-price fallback is used. An exchange request failure fails the
+command instead of presenting a partial result as complete. Estimates rely on
+the trade history the exchange makes available and exclude fees and slippage.
+
+The command values the **entire current reserve target**; it has no date filter.
+It takes one ledger snapshot and fetches history from the earliest to the latest
+still-held addition date (up to the current time for today's additions). Today's
+price can change as more trades execute. Like `add`, the ledger records reserve
+targets, not proof of actual funding: if you reserved coins before receiving them,
+the calculation still uses the addition date. A missing/empty treasury reports
+zero without an API request; a corrupt ledger fails. The existing history-range
+limit of 10,000 days applies. `add`, `free` and `show` remain offline.
+
 #### Storage, scheduling and upgrades
 
 The default file is `treasury.json` in the Node.js project root, or beside the
@@ -685,7 +740,9 @@ functions or fake clients and verify:
 - structured SafeTrade and CoinEx API errors.
 - treasury accumulation/release, ledger consistency, order protection and override;
 - treasury locking across commands/processes and unchanged state after failures;
-- current treasury snapshots in table/CSV statistics.
+- current treasury snapshots and net changes in table/CSV statistics;
+- FIFO treasury cost estimates, weighted USDT prices, missing prices and display rounding;
+- unchanged treasury files during cost queries, including API errors and empty reserves.
 
 For a fast syntax-only check, run:
 
